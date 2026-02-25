@@ -370,9 +370,10 @@ async def entrypoint(ctx: JobContext):
         return sentences[0] if sentences else agent_response
 
     # ── Start Sarvam-powered session ──────────────────────────────────────
+    stt_language = live_config.get("stt_language", "hi-IN")
     session = AgentSession(
         stt=sarvam.STT(
-            language="hi-IN",
+            language=stt_language,
             model="saaras:v3",
             mode="translate",
             flush_signal=True,

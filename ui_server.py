@@ -1,8 +1,11 @@
 import json
 import logging
 import os
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+import asyncio
+import uuid
+from datetime import datetime
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,6 +14,22 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ui-server")
 
 app = FastAPI(title="Med Spa AI Dashboard")
+
+AGENTS_FILE = "agents.json"
+DEMO_FILE = "demo_links.json"
+
+# In-memory bulk campaign tracker
+bulk_campaigns: dict = {}
+
+def read_json_file(path, default):
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return default
+
+def write_json_file(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 CONFIG_FILE = "config.json"
 
@@ -30,6 +49,7 @@ def read_config():
         "llm_model": get_val("llm_model", "LLM_MODEL", "gpt-4o-mini"),
         "tts_voice": get_val("tts_voice", "TTS_VOICE", "kavya"),
         "tts_language": get_val("tts_language", "TTS_LANGUAGE", "hi-IN"),
+        "stt_language": get_val("stt_language", "STT_LANGUAGE", "hi-IN"),
         "livekit_url": get_val("livekit_url", "LIVEKIT_URL", ""),
         "sip_trunk_id": get_val("sip_trunk_id", "SIP_TRUNK_ID", ""),
         "livekit_api_key": get_val("livekit_api_key", "LIVEKIT_API_KEY", ""),
@@ -164,6 +184,225 @@ async def api_get_contacts():
     except Exception as e:
         logger.error(f"Error fetching contacts: {e}")
         return []
+
+# ── Outbound Call Endpoints ───────────────────────────────────────────────────
+
+@app.post("/api/call/outbound")
+async def api_outbound_call(request: Request):
+    data = await request.json()
+    phone_number = data.get("phone_number", "").strip()
+    if not phone_number or not phone_number.startswith("+"):
+        raise HTTPException(400, "Phone number must start with + and include country code")
+    config = read_config()
+    url = config.get("livekit_url") or os.getenv("LIVEKIT_URL", "")
+    api_key = config.get("livekit_api_key") or os.getenv("LIVEKIT_API_KEY", "")
+    api_secret = config.get("livekit_api_secret") or os.getenv("LIVEKIT_API_SECRET", "")
+    if not (url and api_key and api_secret):
+        raise HTTPException(400, "LiveKit credentials not configured")
+    try:
+        import random
+        from livekit import api as lk_api_mod
+        lk = lk_api_mod.LiveKitAPI(url=url, api_key=api_key, api_secret=api_secret)
+        room = f"call-{phone_number.replace('+','')}-{random.randint(1000,9999)}"
+        dispatch = await lk.agent_dispatch.create_dispatch(
+            lk_api_mod.CreateAgentDispatchRequest(
+                agent_name="outbound-caller",
+                room=room,
+                metadata=json.dumps({"phone_number": phone_number})
+            )
+        )
+        await lk.aclose()
+        return {"status": "dispatched", "dispatch_id": dispatch.id, "room": room, "phone": phone_number}
+    except Exception as e:
+        logger.error(f"Outbound dispatch error: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/call/bulk")
+async def api_bulk_calls(request: Request):
+    data = await request.json()
+    numbers = [n.strip() for n in data.get("numbers", []) if n.strip()]
+    if not numbers:
+        raise HTTPException(400, "No phone numbers provided")
+    job_id = str(uuid.uuid4())[:8]
+    bulk_campaigns[job_id] = {"status": "running", "total": len(numbers), "done": 0, "results": []}
+    asyncio.create_task(_run_bulk_campaign(job_id, numbers))
+    return {"job_id": job_id, "total": len(numbers)}
+
+async def _run_bulk_campaign(job_id: str, numbers: list):
+    config = read_config()
+    url = config.get("livekit_url") or os.getenv("LIVEKIT_URL", "")
+    api_key = config.get("livekit_api_key") or os.getenv("LIVEKIT_API_KEY", "")
+    api_secret = config.get("livekit_api_secret") or os.getenv("LIVEKIT_API_SECRET", "")
+    for phone in numbers:
+        if bulk_campaigns.get(job_id, {}).get("status") == "stopped":
+            break
+        result = {"phone": phone, "status": "pending"}
+        try:
+            import random
+            from livekit import api as lk_api_mod
+            lk = lk_api_mod.LiveKitAPI(url=url, api_key=api_key, api_secret=api_secret)
+            room = f"bulk-{phone.replace('+','')}-{random.randint(1000,9999)}"
+            await lk.agent_dispatch.create_dispatch(
+                lk_api_mod.CreateAgentDispatchRequest(
+                    agent_name="outbound-caller", room=room,
+                    metadata=json.dumps({"phone_number": phone})
+                )
+            )
+            await lk.aclose()
+            result["status"] = "dispatched"
+        except Exception as e:
+            result["status"] = f"error: {e}"
+        bulk_campaigns[job_id]["results"].append(result)
+        bulk_campaigns[job_id]["done"] += 1
+        await asyncio.sleep(3)
+    bulk_campaigns[job_id]["status"] = "completed"
+
+@app.get("/api/call/bulk/{job_id}")
+async def api_bulk_status(job_id: str):
+    if job_id not in bulk_campaigns:
+        raise HTTPException(404, "Campaign not found")
+    return bulk_campaigns[job_id]
+
+@app.post("/api/call/bulk/{job_id}/stop")
+async def api_bulk_stop(job_id: str):
+    if job_id in bulk_campaigns:
+        bulk_campaigns[job_id]["status"] = "stopped"
+    return {"status": "stopped"}
+
+# ── Demo Link Endpoints ────────────────────────────────────────────────────────
+
+@app.get("/api/demo/list")
+async def api_demo_list():
+    return read_json_file(DEMO_FILE, [])
+
+@app.post("/api/demo/create")
+async def api_demo_create(request: Request):
+    data = await request.json()
+    links = read_json_file(DEMO_FILE, [])
+    token = str(uuid.uuid4())[:8]
+    link = {
+        "token": token,
+        "name": data.get("name", "Demo Agent"),
+        "phone_number": data.get("phone_number", ""),
+        "language": data.get("language", "Hinglish"),
+        "greeting": data.get("greeting", ""),
+        "created_at": datetime.utcnow().isoformat()
+    }
+    links.append(link)
+    write_json_file(DEMO_FILE, links)
+    return link
+
+@app.delete("/api/demo/{token}")
+async def api_demo_delete(token: str):
+    links = read_json_file(DEMO_FILE, [])
+    links = [l for l in links if l["token"] != token]
+    write_json_file(DEMO_FILE, links)
+    return {"status": "deleted"}
+
+@app.get("/demo/{token}", response_class=HTMLResponse)
+async def demo_page(token: str):
+    links = read_json_file(DEMO_FILE, [])
+    link = next((l for l in links if l["token"] == token), None)
+    if not link:
+        return HTMLResponse("<h1>Demo link not found or expired.</h1>", status_code=404)
+    name = link.get("name", "AI Voice Agent")
+    phone = link.get("phone_number", "")
+    lang = link.get("language", "Hinglish")
+    greeting = link.get("greeting", "Namaste! How can I help you today?")
+    return HTMLResponse(f"""<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>{name} — AI Demo</title>
+<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap' rel='stylesheet'>
+<style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#0f1117 0%,#1a1f35 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;color:#e2e8f0}}.card{{background:rgba(28,35,51,0.95);border:1px solid #2a3448;border-radius:24px;padding:48px 40px;max-width:480px;width:90%;text-align:center;box-shadow:0 24px 80px rgba(0,0,0,0.5)}}.logo{{width:72px;height:72px;background:linear-gradient(135deg,#6c63ff,#a78bfa);border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 24px;font-size:36px}}.title{{font-size:28px;font-weight:700;margin-bottom:8px}}.lang{{font-size:13px;color:#6c63ff;font-weight:600;background:rgba(108,99,255,0.12);padding:4px 14px;border-radius:20px;display:inline-block;margin-bottom:24px}}.greeting{{background:rgba(255,255,255,0.04);border:1px solid #2a3448;border-radius:12px;padding:20px;margin-bottom:32px;font-size:15px;color:#94a3b8;line-height:1.6;font-style:italic}}.phone-btn{{display:inline-flex;align-items:center;gap:10px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;padding:16px 32px;border-radius:14px;font-size:18px;font-weight:700;text-decoration:none;transition:transform 0.15s,box-shadow 0.15s}}.phone-btn:hover{{transform:scale(1.04);box-shadow:0 8px 30px rgba(34,197,94,0.35)}}.powered{{margin-top:32px;font-size:11px;color:#475569}}</style></head>
+<body><div class='card'><div class='logo'>🤖</div><div class='title'>{name}</div><div class='lang'>🌐 {lang}</div>
+<div class='greeting'>💬 "{greeting}"</div>
+{'<a class="phone-btn" href="tel:' + phone + '">📞 Call ' + phone + '</a>' if phone else '<div style="color:#64748b">No phone number configured</div>'}
+<div class='powered'>Powered by AI Voice Agent Platform</div></div></body></html>""")
+
+# ── Agent Management Endpoints ─────────────────────────────────────────────────
+
+def _load_agents():
+    agents = read_json_file(AGENTS_FILE, [])
+    if not agents:
+        # Seed with default agent from current config
+        cfg = read_config()
+        agents = [{
+            "id": "default",
+            "name": "Daisy — Med Spa (Default)",
+            "active": True,
+            "stt_language": cfg.get("stt_language", "hi-IN"),
+            "tts_language": cfg.get("tts_language", "hi-IN"),
+            "tts_voice": cfg.get("tts_voice", "rohan"),
+            "llm_model": cfg.get("llm_model", "gpt-4o-mini"),
+            "first_line": cfg.get("first_line", ""),
+            "agent_instructions": cfg.get("agent_instructions", ""),
+            "created_at": datetime.utcnow().isoformat()
+        }]
+        write_json_file(AGENTS_FILE, agents)
+    return agents
+
+@app.get("/api/agents")
+async def api_agents_list():
+    return _load_agents()
+
+@app.post("/api/agents")
+async def api_agents_create(request: Request):
+    data = await request.json()
+    agents = _load_agents()
+    agent = {
+        "id": str(uuid.uuid4())[:8],
+        "name": data.get("name", "New Agent"),
+        "active": False,
+        "stt_language": data.get("stt_language", "hi-IN"),
+        "tts_language": data.get("tts_language", "hi-IN"),
+        "tts_voice": data.get("tts_voice", "rohan"),
+        "llm_model": data.get("llm_model", "gpt-4o-mini"),
+        "first_line": data.get("first_line", ""),
+        "agent_instructions": data.get("agent_instructions", ""),
+        "created_at": datetime.utcnow().isoformat()
+    }
+    agents.append(agent)
+    write_json_file(AGENTS_FILE, agents)
+    return agent
+
+@app.put("/api/agents/{agent_id}")
+async def api_agents_update(agent_id: str, request: Request):
+    data = await request.json()
+    agents = _load_agents()
+    for a in agents:
+        if a["id"] == agent_id:
+            a.update({k: v for k, v in data.items() if k not in ("id", "created_at")})
+    write_json_file(AGENTS_FILE, agents)
+    return {"status": "updated"}
+
+@app.delete("/api/agents/{agent_id}")
+async def api_agents_delete(agent_id: str):
+    agents = _load_agents()
+    agents = [a for a in agents if a["id"] != agent_id]
+    if not agents:
+        raise HTTPException(400, "Cannot delete the last agent")
+    write_json_file(AGENTS_FILE, agents)
+    return {"status": "deleted"}
+
+@app.post("/api/agents/{agent_id}/activate")
+async def api_agents_activate(agent_id: str):
+    agents = _load_agents()
+    target = next((a for a in agents if a["id"] == agent_id), None)
+    if not target:
+        raise HTTPException(404, "Agent not found")
+    for a in agents:
+        a["active"] = (a["id"] == agent_id)
+    write_json_file(AGENTS_FILE, agents)
+    # Push agent config to config.json
+    write_config({
+        "stt_language": target.get("stt_language", "hi-IN"),
+        "tts_language": target.get("tts_language", "hi-IN"),
+        "tts_voice": target.get("tts_voice", "rohan"),
+        "llm_model": target.get("llm_model", "gpt-4o-mini"),
+        "first_line": target.get("first_line", ""),
+        "agent_instructions": target.get("agent_instructions", ""),
+    })
+    return {"status": "activated", "agent": target}
 
 # ── Main Dashboard HTML ────────────────────────────────────────────────────────
 
@@ -351,6 +590,20 @@ async def get_dashboard():
     .stat-accent {{ color: var(--accent); }}
     .pulse {{ animation: pulse 2s infinite; }}
     @keyframes pulse {{ 0%,100% {{ box-shadow: 0 0 6px var(--green); }} 50% {{ box-shadow: 0 0 14px var(--green); }} }}
+    .preset-btn {{
+      background: transparent; border: 1px solid var(--border); color: var(--muted);
+      border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: all 0.15s; text-align: left;
+    }}
+    .preset-btn:hover {{ border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }}
+    .agent-card {{
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px;
+      transition: border-color 0.15s;
+    }}
+    .agent-card.active {{ border-color: var(--green); box-shadow: 0 0 0 1px rgba(34,197,94,0.2); }}
+    .demo-card {{
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px;
+    }}
   </style>
 </head>
 <body>
@@ -362,6 +615,80 @@ async def get_dashboard():
     <div class="modal-title" id="modal-date-title">Bookings</div>
     <div class="modal-sub" id="modal-date-sub"></div>
     <div id="modal-bookings-body"></div>
+  </div>
+</div>
+
+<!-- ── Agent Modal ── -->
+<div class="modal-overlay" id="agent-modal" onclick="if(event.target===this)closeAgentModal()">
+  <div class="modal-box" style="position:relative;max-width:640px;width:95%;max-height:90vh;overflow-y:auto;">
+    <button class="modal-close" onclick="closeAgentModal()">✕</button>
+    <div class="modal-title">🤖 Agent Configuration</div>
+    <div class="modal-sub">Create or edit an agent persona</div>
+    <div class="form-group"><label>Agent Name</label><input type="text" id="am-name" placeholder="e.g. Priya — Tamil Support"></div>
+    <div class="form-row">
+      <div class="form-group"><label>Language</label>
+        <select id="am-tts-lang">
+          <option value="hi-IN">Hindi (hi-IN)</option>
+          <option value="en-IN">English India (en-IN)</option>
+          <option value="ta-IN">Tamil (ta-IN)</option>
+          <option value="te-IN">Telugu (te-IN)</option>
+          <option value="kn-IN">Kannada (kn-IN)</option>
+          <option value="gu-IN">Gujarati (gu-IN)</option>
+          <option value="bn-IN">Bengali (bn-IN)</option>
+          <option value="mr-IN">Marathi (mr-IN)</option>
+          <option value="ml-IN">Malayalam (ml-IN)</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Voice</label>
+        <select id="am-voice">
+          <option value="rohan">Rohan — Male</option>
+          <option value="kavya">Kavya — Female</option>
+          <option value="priya">Priya — Female</option>
+          <option value="dev">Dev — Male</option>
+          <option value="shreya">Shreya — Female</option>
+          <option value="neha">Neha — Female</option>
+          <option value="ritu">Ritu — Female</option>
+          <option value="amit">Amit — Male</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group"><label>LLM Model</label>
+      <select id="am-llm">
+        <option value="gpt-4o-mini">gpt-4o-mini (Fast)</option>
+        <option value="gpt-4o">gpt-4o (Balanced)</option>
+        <option value="gpt-4.1-mini">gpt-4.1-mini (Latest Fast)</option>
+      </select>
+    </div>
+    <div class="form-group"><label>First Line (Opening Greeting)</label><input type="text" id="am-first-line" placeholder="Namaste! Welcome to..."></div>
+    <div class="form-group"><label>System Instructions</label><textarea id="am-instructions" rows="6" placeholder="You are..."></textarea></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
+      <button class="btn btn-ghost" onclick="closeAgentModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAgent()">💾 Save Agent</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Demo Link Modal ── -->
+<div class="modal-overlay" id="demo-modal" onclick="if(event.target===this)closeDemoModal()">
+  <div class="modal-box" style="position:relative;">
+    <button class="modal-close" onclick="closeDemoModal()">✕</button>
+    <div class="modal-title">🔗 Create Demo Link</div>
+    <div class="modal-sub">Share a branded page so prospects can test your agent</div>
+    <div class="form-group"><label>Demo Name</label><input type="text" id="dm-name" placeholder="e.g. Tamil Demo — Daisy's Med Spa"></div>
+    <div class="form-group"><label>Phone Number (with country code)</label><input type="text" id="dm-phone" placeholder="+918849280319"></div>
+    <div class="form-group"><label>Language Label</label>
+      <select id="dm-language">
+        <option>Hinglish</option><option>Hindi</option><option>English</option>
+        <option>Tamil</option><option>Telugu</option><option>Kannada</option>
+        <option>Gujarati</option><option>Bengali</option><option>Marathi</option>
+        <option>Malayalam</option><option>Multilingual</option>
+      </select>
+    </div>
+    <div class="form-group"><label>Greeting Preview (shown on demo page)</label><input type="text" id="dm-greeting" placeholder="Namaste! Welcome to Daisy's Med Spa..."></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
+      <button class="btn btn-ghost" onclick="closeDemoModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="createDemo()">🔗 Create Link</button>
+    </div>
   </div>
 </div>
 
@@ -387,8 +714,12 @@ async def get_dashboard():
     <div class="nav-item" onclick="goTo('calendar', this); loadCalendar();"><span class="icon">📅</span> Calendar</div>
     <div class="nav-section" style="margin-top:12px;">Configuration</div>
     <div class="nav-item" onclick="goTo('agent', this)"><span class="icon">🤖</span> Agent Settings</div>
-    <div class="nav-item" onclick="goTo('models', this)"><span class="icon">🎙️</span> Models & Voice</div>
+    <div class="nav-item" onclick="goTo('agents', this); loadAgents();"><span class="icon">🧠</span> Agents</div>
+    <div class="nav-item" onclick="goTo('models', this)"><span class="icon">🎙️</span> Models &amp; Voice</div>
     <div class="nav-item" onclick="goTo('credentials', this)"><span class="icon">🔑</span> API Credentials</div>
+    <div class="nav-section" style="margin-top:12px;">Calling</div>
+    <div class="nav-item" onclick="goTo('outbound', this)"><span class="icon">📤</span> Outbound Calls</div>
+    <div class="nav-item" onclick="goTo('demos', this); loadDemos();"><span class="icon">🔗</span> Demo Links</div>
     <div class="nav-section" style="margin-top:12px;">Data</div>
     <div class="nav-item" onclick="goTo('logs', this); loadLogs();"><span class="icon">📞</span> Call Logs</div>
     <div class="nav-item" onclick="goTo('crm', this); loadCRM();"><span class="icon">👥</span> CRM Contacts</div>
@@ -490,7 +821,22 @@ async def get_dashboard():
       <div class="page-sub">Select the LLM brain and TTS voice persona</div>
     </div>
     <div class="section-card">
-      <div class="section-title">Language Model (LLM)</div>
+      <div class="section-title">🌐 Language Presets <span style="font-size:11px;color:var(--muted);font-weight:400;">(click to auto-fill all language settings)</span></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:4px;">
+        <button class="preset-btn" onclick="applyPreset('hindi')">🇮🇳 Hindi</button>
+        <button class="preset-btn" onclick="applyPreset('english')">🇬🇧 English (India)</button>
+        <button class="preset-btn" onclick="applyPreset('tamil')">🌐 Tamil</button>
+        <button class="preset-btn" onclick="applyPreset('telugu')">🌐 Telugu</button>
+        <button class="preset-btn" onclick="applyPreset('kannada')">🌐 Kannada</button>
+        <button class="preset-btn" onclick="applyPreset('gujarati')">🌐 Gujarati</button>
+        <button class="preset-btn" onclick="applyPreset('bengali')">🌐 Bengali</button>
+        <button class="preset-btn" onclick="applyPreset('marathi')">🌐 Marathi</button>
+        <button class="preset-btn" onclick="applyPreset('malayalam')">🌐 Malayalam</button>
+        <button class="preset-btn" onclick="applyPreset('hinglish')" style="border-color:var(--accent);color:var(--accent);">🎯 Hinglish</button>
+        <button class="preset-btn" onclick="applyPreset('multilingual')" style="border-color:#f59e0b;color:#f59e0b;">🌍 Multilingual</button>
+      </div>
+      <div class="hint" id="preset-status"></div>
+    </div>
       <div class="form-group" style="max-width:360px;">
         <label>OpenAI Model</label>
         <select id="llm_model">
@@ -544,6 +890,72 @@ async def get_dashboard():
       <span class="save-status" id="save-status-models">✅ Saved!</span>
       <button class="btn btn-primary" onclick="saveConfig('models')">💾 Save Model Settings</button>
     </div>
+  </div>
+
+  <!-- ── Agents Page ── -->
+  <div id="page-agents" class="page">
+    <div class="page-header">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div>
+          <div class="page-title">🧠 Agent Library</div>
+          <div class="page-sub">Create and manage multiple agent personas. Activate one to make it live.</div>
+        </div>
+        <button class="btn btn-primary" onclick="openAgentModal()">＋ New Agent</button>
+      </div>
+    </div>
+    <div id="agents-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;"></div>
+  </div>
+
+  <!-- ── Outbound Calls Page ── -->
+  <div id="page-outbound" class="page">
+    <div class="page-header">
+      <div class="page-title">📤 Outbound Calls</div>
+      <div class="page-sub">Dispatch AI calls to individual numbers or run bulk campaigns</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;">
+      <div class="section-card">
+        <div class="section-title">Single Call</div>
+        <div class="form-group">
+          <label>Phone Number (with country code)</label>
+          <input type="text" id="single-phone" placeholder="+918849280319">
+          <div class="hint">Must include + and country code</div>
+        </div>
+        <button class="btn btn-primary" style="width:100%" onclick="dispatchSingleCall()">📞 Dispatch Call</button>
+        <div id="single-call-status" style="margin-top:12px;font-size:13px;"></div>
+      </div>
+      <div class="section-card">
+        <div class="section-title">Bulk Campaign</div>
+        <div class="form-group">
+          <label>Phone Numbers (one per line)</label>
+          <textarea id="bulk-phones" rows="6" placeholder="+918849280319
++917777777777
++919999999999"></textarea>
+        </div>
+        <div style="display:flex;gap:10px;">
+          <button class="btn btn-primary" style="flex:1" onclick="startBulkCampaign()">▶ Start Campaign</button>
+          <button class="btn btn-ghost" onclick="stopBulkCampaign()">⏹ Stop</button>
+        </div>
+        <div id="bulk-progress" style="margin-top:14px;"></div>
+      </div>
+    </div>
+    <div class="section-card" style="margin-top:20px;" id="outbound-log-card">
+      <div class="section-title">Campaign Log</div>
+      <div id="outbound-log" style="font-size:13px;color:var(--muted);">No calls dispatched yet.</div>
+    </div>
+  </div>
+
+  <!-- ── Demo Links Page ── -->
+  <div id="page-demos" class="page">
+    <div class="page-header">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div>
+          <div class="page-title">🔗 Demo Links</div>
+          <div class="page-sub">Share branded landing pages so anyone can test your agent instantly</div>
+        </div>
+        <button class="btn btn-primary" onclick="openDemoModal()">＋ Create Demo Link</button>
+      </div>
+    </div>
+    <div id="demos-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;"></div>
   </div>
 
   <!-- ── API Credentials ── -->
@@ -862,6 +1274,7 @@ async function saveConfig(section) {{
       llm_model: get('llm_model'),
       tts_voice: get('tts_voice'),
       tts_language: get('tts_language'),
+      stt_language: get('tts_language') || 'hi-IN',
     }});
   }} else if (section === 'credentials') {{
     Object.assign(payload, {{
@@ -886,6 +1299,171 @@ async function saveConfig(section) {{
   }} else {{
     alert('Failed to save. Check server logs.');
   }}
+}}
+
+// ── Language Presets ─────────────────────────────────────────────────────────
+const PRESETS = {{
+  hindi:       {{stt:'hi-IN',tts:'hi-IN',voice:'rohan', label:'Hindi',    greeting:"Namaste! Daisy's Med Spa mein aapka swagat hai. Main aapki kaise madad kar sakti hoon?"}},
+  english:     {{stt:'en-IN',tts:'en-IN',voice:'dev',   label:'English',  greeting:"Hello! Welcome to Daisy's Med Spa. How can I help you today?"}},
+  tamil:       {{stt:'ta-IN',tts:'ta-IN',voice:'kavya', label:'Tamil',    greeting:"Vanakkam! Daisy's Med Spa-vil ungalai varkarpom. Naan ungalukku eppadi udavalam?"}},
+  telugu:      {{stt:'te-IN',tts:'te-IN',voice:'shreya',label:'Telugu',   greeting:"Namaskaram! Daisy's Med Spa ki swaagatam. Meeru ela help kavalaano?"}},
+  kannada:     {{stt:'kn-IN',tts:'kn-IN',voice:'neha',  label:'Kannada',  greeting:"Namaskara! Daisy's Med Spa ge swaagatha. Naanu nimage hege sahaya maadali?"}},
+  gujarati:    {{stt:'gu-IN',tts:'gu-IN',voice:'priya', label:'Gujarati', greeting:"Namaste! Daisy's Med Spa ma apnu swagat che. Hu tamne kevi rite madad kari shakun?"}},
+  bengali:     {{stt:'bn-IN',tts:'bn-IN',voice:'ritu',  label:'Bengali',  greeting:"Namaskar! Daisy's Med Spa-te apnake swagat. Ami apnake kemon sahajata korte pari?"}},
+  marathi:     {{stt:'mr-IN',tts:'mr-IN',voice:'kavya', label:'Marathi',  greeting:"Namaskar! Daisy's Med Spa madhe aapale swagat aahe. Mi tumhala kashi madad karu shkto?"}},
+  malayalam:   {{stt:'ml-IN',tts:'ml-IN',voice:'priya', label:'Malayalam',greeting:"Namaskaram! Daisy's Med Spa-il swagatham. Ente sahayam enthu?"}},
+  hinglish:    {{stt:'hi-IN',tts:'hi-IN',voice:'rohan', label:'Hinglish', greeting:"Namaste! Welcome to Daisy's Med Spa. Main aapki kaise help kar sakti hoon?"}},
+  multilingual:{{stt:'hi-IN',tts:'hi-IN',voice:'rohan', label:'Multilingual',greeting:"Namaste! Welcome to Daisy's Med Spa. Please speak any language — Hindi, English, Tamil, Telugu — and I'll respond in the same language."}},
+}};
+
+async function applyPreset(key) {{
+  const p = PRESETS[key]; if (!p) return;
+  const setV = (id,v) => {{ const e=document.getElementById(id); if(e) e.value=v; }};
+  setV('tts_language', p.tts); setV('tts_voice', p.voice); setV('first_line', p.greeting);
+  const res = await fetch('/api/config', {{
+    method:'POST', headers:{{'Content-Type':'application/json'}},
+    body: JSON.stringify({{tts_language:p.tts, stt_language:p.stt, tts_voice:p.voice, first_line:p.greeting}})
+  }});
+  const st = document.getElementById('preset-status');
+  if (st) {{ st.textContent = res.ok ? '✅ '+p.label+' preset applied!' : '❌ Failed'; st.style.color = res.ok ? 'var(--green)':'var(--red)'; }}
+}}
+
+// ── Agents ────────────────────────────────────────────────────────────────────
+let editingAgentId = null;
+
+async function loadAgents() {{
+  const g = document.getElementById('agents-grid'); if (!g) return;
+  g.innerHTML = '<div style="color:var(--muted);padding:20px;">Loading...</div>';
+  const agents = await fetch('/api/agents').then(r=>r.json()).catch(()=>[]);
+  if (!agents.length) {{ g.innerHTML='<div style="color:var(--muted);padding:20px;">No agents yet.</div>'; return; }}
+  g.innerHTML = agents.map(a=>`
+    <div class="agent-card${{a.active?' active':''}}">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+        <div style="font-weight:700;">🤖 ${{a.name}}</div>
+        ${{a.active?'<span class="badge badge-green">● Live</span>':''}}
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">
+        🌐 ${{a.tts_language||'hi-IN'}} · 🎙 ${{a.tts_voice||'rohan'}} · 🧠 ${{a.llm_model||'gpt-4o-mini'}}
+      </div>
+      <div style="display:flex;gap:8px;">
+        ${{!a.active?`<button class="btn btn-primary btn-sm" onclick="activateAgent('${{a.id}}')">▶ Activate</button>`:''}}
+        <button class="btn btn-ghost btn-sm" onclick='editAgent(${{JSON.stringify(a)}})'>✏ Edit</button>
+        ${{a.id!=='default'?`<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="deleteAgent('${{a.id}}')">🗑</button>`:''}}
+      </div>
+    </div>`).join('');
+}}
+
+async function activateAgent(id) {{ await fetch('/api/agents/'+id+'/activate',{{method:'POST'}}); loadAgents(); }}
+async function deleteAgent(id) {{
+  if (!confirm('Delete this agent?')) return;
+  await fetch('/api/agents/'+id,{{method:'DELETE'}}); loadAgents();
+}}
+function editAgent(agent) {{
+  editingAgentId = agent.id;
+  ['am-name','am-tts-lang','am-voice','am-llm','am-first-line','am-instructions'].forEach(id => {{
+    const el=document.getElementById(id); if(!el) return;
+    const key = {{
+      'am-name':'name','am-tts-lang':'tts_language','am-voice':'tts_voice',
+      'am-llm':'llm_model','am-first-line':'first_line','am-instructions':'agent_instructions'
+    }}[id];
+    if (key) el.value = agent[key]||'';
+  }});
+  document.getElementById('agent-modal').classList.add('open');
+}}
+function openAgentModal() {{ editingAgentId=null; document.getElementById('agent-modal').classList.add('open'); }}
+function closeAgentModal() {{ document.getElementById('agent-modal').classList.remove('open'); }}
+async function saveAgent() {{
+  const g = id => {{ const e=document.getElementById(id); return e?e.value:''; }};
+  const data = {{ name:g('am-name'), tts_language:g('am-tts-lang'), stt_language:g('am-tts-lang'),
+    tts_voice:g('am-voice'), llm_model:g('am-llm'), first_line:g('am-first-line'), agent_instructions:g('am-instructions') }};
+  const url = editingAgentId ? '/api/agents/'+editingAgentId : '/api/agents';
+  const method = editingAgentId ? 'PUT' : 'POST';
+  await fetch(url,{{method,headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}});
+  closeAgentModal(); loadAgents();
+}}
+
+// ── Outbound Calls ────────────────────────────────────────────────────────────
+let activeBulkJobId = null, bulkPollTimer = null;
+
+async function dispatchSingleCall() {{
+  const phone = (document.getElementById('single-phone')||{{}}).value||''.trim();
+  const st = document.getElementById('single-call-status');
+  if (!phone) {{ st.textContent='❌ Enter a phone number'; return; }}
+  st.textContent='⏳ Dispatching...';
+  const res = await fetch('/api/call/outbound',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{phone_number:phone}})}}).catch(e=>{{st.textContent='❌ '+e.message;return null;}});
+  if (!res) return;
+  const d = await res.json();
+  if (res.ok) {{
+    st.innerHTML='<span style="color:var(--green)">✅ Dispatched! Room: '+d.room+'</span>';
+    const log=document.getElementById('outbound-log');
+    log.innerHTML='<div style="padding:10px;background:rgba(34,197,94,0.08);border-radius:8px;margin-bottom:8px;">📞 '+phone+' — Dispatched</div>'+log.innerHTML;
+  }} else st.innerHTML='<span style="color:var(--red)">❌ '+(d.detail||'Error')+'</span>';
+}}
+
+async function startBulkCampaign() {{
+  const raw=(document.getElementById('bulk-phones')||{{}}).value||'';
+  const numbers=raw.split('\n').map(n=>n.trim()).filter(Boolean);
+  if (!numbers.length) return;
+  const res = await fetch('/api/call/bulk',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{numbers}})}});
+  const d = await res.json();
+  activeBulkJobId = d.job_id;
+  document.getElementById('bulk-progress').innerHTML='<span style="color:var(--accent)">🚀 Campaign '+d.job_id+' — '+d.total+' numbers</span>';
+  bulkPollTimer = setInterval(pollBulkStatus, 3000);
+}}
+
+async function pollBulkStatus() {{
+  if (!activeBulkJobId) return;
+  const d = await fetch('/api/call/bulk/'+activeBulkJobId).then(r=>r.json()).catch(()=>null);
+  if (!d) return;
+  const log=document.getElementById('outbound-log');
+  log.innerHTML = d.results.map(r=>'<div style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:12px;">📞 '+r.phone+' — <b style="color:'+(r.status==='dispatched'?'var(--green)':'var(--red)')+'">'+r.status+'</b></div>').join('');
+  document.getElementById('bulk-progress').innerHTML='Progress: '+d.done+'/'+d.total+' — <b>'+d.status+'</b>';
+  if (['completed','stopped'].includes(d.status)) {{ clearInterval(bulkPollTimer); activeBulkJobId=null; }}
+}}
+
+async function stopBulkCampaign() {{
+  if (!activeBulkJobId) return;
+  await fetch('/api/call/bulk/'+activeBulkJobId+'/stop',{{method:'POST'}});
+  clearInterval(bulkPollTimer);
+}}
+
+// ── Demo Links ────────────────────────────────────────────────────────────────
+async function loadDemos() {{
+  const g=document.getElementById('demos-grid'); if(!g) return;
+  g.innerHTML='<div style="color:var(--muted);padding:20px;">Loading...</div>';
+  const demos=await fetch('/api/demo/list').then(r=>r.json()).catch(()=>[]);
+  if (!demos.length) {{ g.innerHTML='<div style="color:var(--muted);padding:20px;">No demo links yet. Create one to share with prospects!</div>'; return; }}
+  g.innerHTML=demos.map(d=>`
+    <div class="demo-card">
+      <div style="font-weight:700;font-size:15px;margin-bottom:6px;">🤖 ${{d.name}}</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">🌐 ${{d.language}} · 📅 ${{new Date(d.created_at+'Z').toLocaleDateString()}}</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px;font-style:italic;">"${{(d.greeting||'').slice(0,80)}}"</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-primary btn-sm" onclick="copyDemo('${{d.token}}')">📋 Copy Link</button>
+        <a class="btn btn-ghost btn-sm" href="/demo/${{d.token}}" target="_blank" style="text-decoration:none;">👁 Preview</a>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="deleteDemo('${{d.token}}')">🗑</button>
+      </div>
+    </div>`).join('');
+}}
+
+function copyDemo(token) {{
+  const url=location.protocol+'//'+location.host+'/demo/'+token;
+  navigator.clipboard.writeText(url).then(()=>alert('✅ Copied: '+url));
+}}
+
+async function deleteDemo(token) {{
+  if (!confirm('Delete this demo link?')) return;
+  await fetch('/api/demo/'+token,{{method:'DELETE'}}); loadDemos();
+}}
+
+function openDemoModal() {{ document.getElementById('demo-modal').classList.add('open'); }}
+function closeDemoModal() {{ document.getElementById('demo-modal').classList.remove('open'); }}
+
+async function createDemo() {{
+  const g=id=>{{ const e=document.getElementById(id); return e?e.value:''; }};
+  await fetch('/api/demo/create',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{name:g('dm-name'),phone_number:g('dm-phone'),language:g('dm-language'),greeting:g('dm-greeting')}})}});
+  closeDemoModal(); loadDemos();
 }}
 
 // ── Boot ────────────────────────────────────────────────────────────────────
