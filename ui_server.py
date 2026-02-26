@@ -1062,10 +1062,12 @@ async def get_dashboard():
 <script>
 // ── Navigation ──────────────────────────────────────────────────────────────
 function goTo(pageId, el) {{
+  const target = document.getElementById('page-' + pageId);
+  if (!target) {{ console.warn('Page not found: page-' + pageId); return; }}
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById('page-' + pageId).classList.add('active');
-  el.classList.add('active');
+  target.classList.add('active');
+  if (el) el.classList.add('active');
 }}
 
 // ── Stats & Dashboard ───────────────────────────────────────────────────────
