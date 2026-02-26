@@ -135,3 +135,50 @@ def notify_agent_error(caller_phone: str, error: str) -> bool:
         f"_RapidXAI Voice Agent_ 🤖"
     )
     return send_telegram(message)
+
+
+# ── WhatsApp Confirmation (#16) ────────────────────────────────────────────────
+
+def notify_whatsapp_booking(caller_phone: str, booking_time: str, caller_name: str) -> None:
+    """Send WhatsApp confirmation via Twilio API (non-blocking)."""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    from_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+    if not account_sid or not auth_token:
+        return
+    message = (
+        f"Hi {caller_name}! Your appointment has been confirmed for "
+        f"{booking_time}. We look forward to seeing you! 💆"
+    )
+    try:
+        import requests as req
+        resp = req.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
+            auth=(account_sid, auth_token),
+            data={"From": from_number, "To": f"whatsapp:{caller_phone}", "Body": message},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        logger.info(f"[WHATSAPP] Sent to {caller_phone}")
+    except Exception as e:
+        logger.error(f"[WHATSAPP] Failed: {e}")
+
+
+# ── Generic Webhook Delivery (#35) ────────────────────────────────────────────
+
+async def send_webhook(webhook_url: str, event_type: str, payload: dict) -> None:
+    """Deliver an event to a client's webhook URL."""
+    if not webhook_url:
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                webhook_url,
+                json={"event": event_type, "timestamp": datetime.utcnow().isoformat(), "data": payload},
+                timeout=5.0,
+                headers={"Content-Type": "application/json"},
+            )
+            logger.info(f"[WEBHOOK] {event_type} → {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"[WEBHOOK] Failed to deliver {event_type}: {e}")

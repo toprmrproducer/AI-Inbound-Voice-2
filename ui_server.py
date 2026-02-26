@@ -5,7 +5,7 @@ import asyncio
 import uuid
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, Response
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,6 +14,34 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ui-server")
 
 app = FastAPI(title="Med Spa AI Dashboard")
+
+# ── #22 Health check endpoint ─────────────────────────────────────────────────
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat(), "service": "inbound-voice-agent"}
+
+# ── #40 Prometheus metrics endpoint ──────────────────────────────────────────
+try:
+    from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    _calls_total   = Counter("voice_calls_total",  "Total calls handled")
+    _calls_booked  = Counter("voice_calls_booked_total", "Calls that resulted in a booking")
+    _call_duration = Histogram("voice_call_duration_seconds", "Call duration in seconds",
+                               buckets=[10, 30, 60, 120, 300, 600])
+    @app.get("/metrics")
+    def metrics():
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    @app.post("/internal/record-call")
+    async def record_call(request: Request):
+        data = await request.json()
+        _calls_total.inc()
+        if data.get("booked"):
+            _calls_booked.inc()
+        if data.get("duration"):
+            _call_duration.observe(data["duration"])
+        return {"ok": True}
+except ImportError:
+    pass  # prometheus_client not installed — metrics endpoint skipped
 
 AGENTS_FILE = "agents.json"
 DEMO_FILE = "demo_links.json"
