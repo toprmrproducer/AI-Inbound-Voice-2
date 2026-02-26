@@ -837,6 +837,8 @@ async def get_dashboard():
       </div>
       <div class="hint" id="preset-status"></div>
     </div>
+    <div class="section-card">
+      <div class="section-title">Language Model (LLM)</div>
       <div class="form-group" style="max-width:360px;">
         <label>OpenAI Model</label>
         <select id="llm_model">
