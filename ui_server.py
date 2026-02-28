@@ -115,8 +115,11 @@ async def api_post_config(request: Request):
 @app.get("/api/logs")
 async def api_get_logs():
     config = read_config()
-    os.environ["SUPABASE_URL"] = config.get("supabase_url", "")
-    os.environ["SUPABASE_KEY"] = config.get("supabase_key", "")
+    # Prefer env vars (Coolify) over config.json
+    if not os.environ.get("SUPABASE_URL"):
+        os.environ["SUPABASE_URL"] = config.get("supabase_url", "")
+    if not os.environ.get("SUPABASE_KEY"):
+        os.environ["SUPABASE_KEY"] = config.get("supabase_key", "")
     import db
     try:
         logs = db.fetch_call_logs(limit=50)
@@ -162,8 +165,10 @@ async def api_get_bookings():
 @app.get("/api/stats")
 async def api_get_stats():
     config = read_config()
-    os.environ["SUPABASE_URL"] = config.get("supabase_url", "")
-    os.environ["SUPABASE_KEY"] = config.get("supabase_key", "")
+    if not os.environ.get("SUPABASE_URL"):
+        os.environ["SUPABASE_URL"] = config.get("supabase_url", "")
+    if not os.environ.get("SUPABASE_KEY"):
+        os.environ["SUPABASE_KEY"] = config.get("supabase_key", "")
     import db
     try:
         return db.fetch_stats()
@@ -1100,34 +1105,63 @@ function goTo(pageId, el) {{
 
 // ── Stats & Dashboard ───────────────────────────────────────────────────────
 async function loadDashboard() {{
-  try {{
-    const [stats, logs] = await Promise.all([
-      fetch('/api/stats').then(r => r.json()),
-      fetch('/api/logs').then(r => r.json())
-    ]);
-    document.getElementById('stat-calls').textContent = stats.total_calls ?? '—';
-    document.getElementById('stat-bookings').textContent = stats.total_bookings ?? '—';
-    document.getElementById('stat-duration').textContent = stats.avg_duration ? stats.avg_duration + 's' : '—';
-    document.getElementById('stat-rate').textContent = stats.booking_rate ? stats.booking_rate + '%' : '—';
+  // Optimistically clear Loading...
+  const tbody = document.getElementById('dash-table-body');
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">Loading...</td></tr>';
 
-    const tbody = document.getElementById('dash-table-body');
-    if (!logs || logs.length === 0) {{
-      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">No calls yet. Make a test call!</td></tr>';
-      return;
-    }}
-    tbody.innerHTML = logs.slice(0, 10).map(log => `
-      <tr>
-        <td style="color:var(--muted)">${{new Date(log.created_at).toLocaleString()}}</td>
-        <td style="font-weight:600">${{log.phone_number || 'Unknown'}}</td>
-        <td>${{log.duration_seconds || 0}}s</td>
-        <td>${{badgeFor(log.summary)}}</td>
-        <td>
-          ${{log.id ? `<a style="color:var(--accent);font-size:12px;text-decoration:none;" href="/api/logs/${{log.id}}/transcript" download="transcript_${{log.id}}.txt">⬇ Download</a>` : ''}}
-        </td>
-      </tr>`).join('');
+  let stats = null, logs = null;
+
+  // Fetch stats
+  try {{
+    const r = await fetch('/api/stats');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    stats = await r.json();
   }} catch(e) {{
-    document.getElementById('dash-table-body').innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">Could not load data — check Supabase credentials.</td></tr>';
+    console.error('Stats fetch failed:', e);
   }}
+
+  // Fetch logs separately so one failure doesn't break the other
+  try {{
+    const r = await fetch('/api/logs');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    logs = await r.json();
+  }} catch(e) {{
+    console.error('Logs fetch failed:', e);
+  }}
+
+  // ── Update stat cards ──────────────────────────────────────────────────
+  if (stats !== null) {{
+    const fmt = (v, suffix='') => (v !== null && v !== undefined) ? v + suffix : '0' + suffix;
+    document.getElementById('stat-calls').textContent    = fmt(stats.total_calls);
+    document.getElementById('stat-bookings').textContent = fmt(stats.total_bookings);
+    document.getElementById('stat-duration').textContent = fmt(stats.avg_duration, 's');
+    document.getElementById('stat-rate').textContent     = fmt(stats.booking_rate, '%');
+  }} else {{
+    ['stat-calls','stat-bookings','stat-duration','stat-rate'].forEach(id => {{
+      document.getElementById(id).textContent = '!';
+      document.getElementById(id).title = 'Could not load — check Supabase credentials';
+    }});
+  }}
+
+  // ── Update calls table ─────────────────────────────────────────────────
+  if (logs === null) {{
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:#e06c75;">⚠ Could not load calls — check Supabase URL and KEY in API Credentials.</td></tr>';
+    return;
+  }}
+  if (!logs.length) {{
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">No calls yet. Make a test call!</td></tr>';
+    return;
+  }}
+  tbody.innerHTML = logs.slice(0, 20).map(log => `
+    <tr>
+      <td style="color:var(--muted)">${{new Date(log.created_at).toLocaleString()}}</td>
+      <td style="font-weight:600">${{log.phone_number || 'Unknown'}}</td>
+      <td>${{log.duration_seconds || 0}}s</td>
+      <td>${{badgeFor(log.summary)}}</td>
+      <td>
+        ${{log.id ? `<a style="color:var(--accent);font-size:12px;text-decoration:none;" href="/api/logs/${{log.id}}/transcript" download="transcript_${{log.id}}.txt">⬇ Download</a>` : ''}}
+      </td>
+    </tr>`).join('');
 }}
 
 function badgeFor(summary) {{
