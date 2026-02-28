@@ -510,17 +510,15 @@ async def entrypoint(ctx: JobContext):
     if llm_provider == "groq":
         active_llm = openai.LLM.with_groq(
             model=llm_model or "llama-3.3-70b-versatile",
-            max_tokens=120,
         )
     elif llm_provider == "claude":
         active_llm = openai.LLM(
             model="claude-haiku-3-5-latest",
             base_url="https://api.anthropic.com/v1/",
             api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-            max_tokens=120,
         )
     else:
-        active_llm = openai.LLM(model=llm_model, max_tokens=120)
+        active_llm = openai.LLM(model=llm_model)
 
     # ── Build STT (#9/#20) ────────────────────────────────────────────────
     if stt_provider == "deepgram" and deepgram_plugin:
