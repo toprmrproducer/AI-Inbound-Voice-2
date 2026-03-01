@@ -99,6 +99,72 @@ def is_rate_limited(phone: str) -> bool:
     _call_timestamps[phone].append(now)
     return False
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MULTILINGUAL AUTO-DETECTION CONFIG
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Sarvam Bulbul v3 — best voice per language
+LANGUAGE_CONFIG = {
+    "hi-IN": {"speaker": "rohan",      "tts_lang": "hi-IN", "name": "Hindi"},
+    "bn-IN": {"speaker": "arnav",      "tts_lang": "bn-IN", "name": "Bengali"},
+    "ta-IN": {"speaker": "pavithra",   "tts_lang": "ta-IN", "name": "Tamil"},
+    "te-IN": {"speaker": "ananya",     "tts_lang": "te-IN", "name": "Telugu"},
+    "gu-IN": {"speaker": "avni",       "tts_lang": "gu-IN", "name": "Gujarati"},
+    "kn-IN": {"speaker": "suresh",     "tts_lang": "kn-IN", "name": "Kannada"},
+    "ml-IN": {"speaker": "aswin",      "tts_lang": "ml-IN", "name": "Malayalam"},
+    "mr-IN": {"speaker": "aarohi",     "tts_lang": "mr-IN", "name": "Marathi"},
+    "pa-IN": {"speaker": "gurpreet",   "tts_lang": "pa-IN", "name": "Punjabi"},
+    "od-IN": {"speaker": "subhashini", "tts_lang": "od-IN", "name": "Odia"},
+    "en-IN": {"speaker": "anushka",    "tts_lang": "en-IN", "name": "English"},
+    # STT-only (no Bulbul TTS — fallback)
+    "ur-IN": {"speaker": "rohan",      "tts_lang": "hi-IN", "name": "Urdu"},
+    "as-IN": {"speaker": "aarohi",     "tts_lang": "mr-IN", "name": "Assamese"},
+    "ne-IN": {"speaker": "rohan",      "tts_lang": "hi-IN", "name": "Nepali"},
+}
+
+GREETINGS = {
+    "hi-IN": "नमस्ते! मैं आपका मेड स्पा असिस्टेंट हूं। आज मैं आपकी कैसे मदद कर सकता हूं?",
+    "ta-IN": "வணக்கம்! நான் உங்கள் மெட் ஸ்பா உதவியாளர். நான் உங்களுக்கு எப்படி உதவலாம்?",
+    "bn-IN": "নমস্কার! আমি আপনার মেড স্পা সহকারী। আজ আমি আপনাকে কীভাবে সাহায্য করতে পারি?",
+    "te-IN": "నమస్కారం! నేను మీ మెడ్ స్పా అసిస్టెంట్. నేను మీకు ఎలా సహాయం చేయగలను?",
+    "gu-IN": "નમસ્તે! હું તમારો મેડ સ્પા સહાયક છું. આજ હું તમારી કેવી રીતે મદદ કરી શકું?",
+    "kn-IN": "ನಮಸ್ಕಾರ! ನಾನು ನಿಮ್ಮ ಮೆಡ್ ಸ್ಪಾ ಸಹಾಯಕ. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?",
+    "ml-IN": "നമസ്കാരം! ഞാൻ നിങ്ങളുടെ മെഡ് സ്പാ അസിസ്റ്റന്റ് ആണ്. ഞാൻ നിങ്ങളെ എങ്ങനെ സഹായിക്കാം?",
+    "mr-IN": "नमस्कार! मी तुमचा मेड स्पा सहाय्यक आहे. आज मी तुम्हाला कशी मदद करू शकतो?",
+    "pa-IN": "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ ਤੁਹਾਡਾ ਮੇਡ ਸਪਾ ਸਹਾਇਕ ਹਾਂ। ਮੈਂ ਅੱਜ ਤੁਹਾਡੀ ਕਿਵੇਂ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ?",
+    "od-IN": "ନମସ୍କାର! ମୁଁ ଆପଣଙ୍କ ମେଡ ସ୍ପା ସହାୟକ। ଆଜି ମୁଁ ଆପଣଙ୍କୁ କିପରି ସାହାଯ୍ୟ କରିପାରିବି?",
+    "en-IN": "Hello! I'm your Med Spa assistant. How can I help you today?",
+    "auto": "Hello! Namaste! I'm your Med Spa assistant — you can speak in any Indian language.",
+}
+
+MED_SPA_SERVICES = "facials, laser treatments, Botox, skin care, hair removal, body contouring"
+
+def get_lang_config(lang_code: str) -> dict:
+    return LANGUAGE_CONFIG.get(lang_code, LANGUAGE_CONFIG["hi-IN"])
+
+def get_multilingual_greeting(lang: str) -> str:
+    return GREETINGS.get(lang, GREETINGS["auto"])
+
+def build_multilang_system_prompt(lang_code: str, base_instructions: str = "") -> str:
+    """Build a language-locked system prompt for the given detected language."""
+    cfg = get_lang_config(lang_code)
+    lang_name = cfg["name"]
+    core = f"""
+
+═══════════════════════════════════════════
+CRITICAL LANGUAGE RULE — NON-NEGOTIABLE:
+You MUST speak ONLY in {lang_name}.
+NEVER switch to Hindi, English, or any other language.
+Even if the user mixes languages, ALWAYS reply in {lang_name}.
+If a medical term has no {lang_name} equivalent, say it in English only for that word.
+Language: {lang_name} ONLY.
+═══════════════════════════════════════════
+
+"""
+    return (base_instructions or "") + core
+
+
 def get_live_config(phone_number: str = None):
     """Load config: try per-client config first, then default (#17)."""
     config = {}
@@ -384,6 +450,57 @@ class OutboundAssistant(Agent):
 
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTO-LANGUAGE AGENT (for demo + future inbound use)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AutoLanguageAgent(Agent):
+    """
+    Wraps OutboundAssistant logic for demo sessions.
+    Listens for Saaras v3 language detection on first user utterance,
+    then dynamically switches TTS speaker + system prompt to match.
+    """
+
+    def __init__(self, base_instructions: str = "", first_line: str = ""):
+        self._base_instructions = base_instructions
+        self._first_line = first_line
+        self.detected_language: str | None = None
+        self.language_locked = False
+        self._session_ref = None          # set after session.start()
+        super().__init__(instructions=base_instructions or build_multilang_system_prompt("hi-IN", base_instructions))
+
+    async def on_user_turn_completed(self, turn_ctx, new_message):
+        """Fires after every user utterance. We detect language here."""
+        if not self.language_locked:
+            detected = getattr(new_message, "language", None)
+            if not detected:
+                # Try nested transcript attribute
+                try:
+                    detected = new_message.content[0].language  # type: ignore[attr-defined]
+                except Exception:
+                    detected = None
+            if detected and detected not in ("unknown", "", None) and detected in LANGUAGE_CONFIG:
+                self.detected_language = detected
+                self.language_locked = True
+                logger.info(f"[LANG] Detected: {detected} ({get_lang_config(detected)['name']}) — locking in")
+                # Update system prompt to enforce the detected language
+                self.instructions = build_multilang_system_prompt(detected, self._base_instructions)
+                # Swap TTS on the session if available
+                if self._session_ref is not None:
+                    cfg = get_lang_config(detected)
+                    try:
+                        self._session_ref._tts = sarvam.TTS(
+                            model="bulbul:v3",
+                            speaker=cfg["speaker"],
+                            target_language_code=cfg["tts_lang"],
+                        )
+                        logger.info(f"[LANG] TTS swapped to {cfg['name']} (speaker={cfg['speaker']})")
+                    except Exception as e:
+                        logger.warning(f"[LANG] TTS swap failed: {e}")
+        await super().on_user_turn_completed(turn_ctx, new_message)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DEMO SESSION (Browser-based LiveKit call)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -395,28 +512,41 @@ async def run_demo_session(ctx: JobContext):
     Uses the same voice pipeline as regular inbound calls.
     """
     logger.info(f"[DEMO] Browser demo session in room: {ctx.room.name}")
-    live_config  = read_live_config()
+    live_config  = get_live_config()
     llm_model    = live_config.get("llm_model",    "gpt-4o-mini")
     tts_language = live_config.get("tts_language", "hi-IN")
     tts_voice    = live_config.get("tts_voice",    "rohan")
     stt_language = live_config.get("stt_language", "hi-IN")
     first_line   = live_config.get("first_line",   "Namaste! Welcome. How can I help you today?")
 
+    base_instructions = live_config.get("agent_instructions", "")
+
+    agent = AutoLanguageAgent(
+        base_instructions=base_instructions,
+        first_line=first_line,
+    )
+
     session = AgentSession(
-        stt=sarvam.STT(model="saaras:v3", language=stt_language, mode="translate"),
+        # language="unknown" → Saaras v3 auto-detects from first utterance
+        stt=sarvam.STT(model="saaras:v3", language="unknown", mode="transcribe"),
         llm=openai.LLM(model=llm_model),
-        tts=sarvam.TTS(model="bulbul:v3", speaker=tts_voice, target_language_code=tts_language),
+        tts=sarvam.TTS(
+            model="bulbul:v3",
+            speaker=get_lang_config("hi-IN")["speaker"],   # default until detected
+            target_language_code="hi-IN",
+        ),
         turn_detection="stt",
         allow_interruptions=True,
     )
 
-    agent = MedSpaAgent(
-        instructions=live_config.get("agent_instructions", ""),
-        first_line=first_line,
-    )
+    # Give agent a reference to session so it can swap TTS on detection
+    agent._session_ref = session
 
     await session.start(room=ctx.room, agent=agent)
-    await session.say(first_line, allow_interruptions=True)
+
+    # Greet in "auto" neutral language before detection
+    greeting = live_config.get("first_line") or get_multilingual_greeting("auto")
+    await session.say(greeting, allow_interruptions=True)
     logger.info("[DEMO] Session live.")
     await session.wait_for_disconnect()
     logger.info(f"[DEMO] Session ended: {ctx.room.name}")
@@ -575,9 +705,9 @@ async def entrypoint(ctx: JobContext):
         )
     else:
         active_stt = sarvam.STT(
-            language=stt_language,
+            language="unknown",   # auto-detect via Saaras v3
             model="saaras:v3",
-            mode="translate",
+            mode="transcribe",    # transcribe preserves original language for detection
             flush_signal=True,
         )
 

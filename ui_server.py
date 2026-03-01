@@ -307,17 +307,18 @@ async def api_demo_create(request: Request):
     body = await request.json()
     label = body.get("label") or body.get("name", "Demo Link")
     slug = ''.join(secrets.choice(_string.ascii_lowercase + _string.digits) for _ in range(8))
+    language = body.get("language", "auto")
     try:
         with _get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO demo_links (slug, label) VALUES (%s, %s) RETURNING id, slug",
-                    (slug, label)
+                    "INSERT INTO demo_links (slug, label, language) VALUES (%s, %s, %s) RETURNING id, slug",
+                    (slug, label, language)
                 )
                 row = cur.fetchone()
                 conn.commit()
         base_url = os.getenv("PUBLIC_BASE_URL", "")
-        return {"slug": row[1], "url": f"{base_url}/demo/{row[1]}", "label": label, "token": row[1]}
+        return {"slug": row[1], "url": f"{base_url}/demo/{row[1]}", "label": label, "language": language, "token": row[1]}
     except Exception as e:
         logger.error(f"[DEMO] create failed: {e}")
         raise HTTPException(500, str(e))
@@ -952,10 +953,19 @@ async def get_dashboard():
     <div class="form-group"><label>Phone Number (with country code)</label><input type="text" id="dm-phone" placeholder="+918849280319"></div>
     <div class="form-group"><label>Language Label</label>
       <select id="dm-language">
-        <option>Hinglish</option><option>Hindi</option><option>English</option>
-        <option>Tamil</option><option>Telugu</option><option>Kannada</option>
-        <option>Gujarati</option><option>Bengali</option><option>Marathi</option>
-        <option>Malayalam</option><option>Multilingual</option>
+        <option value="auto" selected>Auto-detect 🌐 (recommended)</option>
+        <option value="hi-IN">Hindi</option>
+        <option value="en-IN">English</option>
+        <option value="ta-IN">Tamil</option>
+        <option value="te-IN">Telugu</option>
+        <option value="bn-IN">Bengali</option>
+        <option value="gu-IN">Gujarati</option>
+        <option value="kn-IN">Kannada</option>
+        <option value="ml-IN">Malayalam</option>
+        <option value="mr-IN">Marathi</option>
+        <option value="pa-IN">Punjabi</option>
+        <option value="od-IN">Odia</option>
+        <option value="ur-IN">Urdu (Hindi TTS)</option>
       </select>
     </div>
     <div class="form-group"><label>Greeting Preview (shown on demo page)</label><input type="text" id="dm-greeting" placeholder="Namaste! Welcome to Daisy's Med Spa..."></div>
@@ -1740,15 +1750,27 @@ async function loadDemos() {{
   g.innerHTML='<div style="color:var(--muted);padding:20px;">Loading...</div>';
   const demos=await fetch('/api/demo/list').then(r=>r.json()).catch(()=>[]);
   if (!demos.length) {{ g.innerHTML='<div style="color:var(--muted);padding:20px;">No demo links yet. Create one to share with prospects!</div>'; return; }}
+  const LANG_NAMES = {{
+    'auto':'Auto-detect 🌐','hi-IN':'Hindi','en-IN':'English','ta-IN':'Tamil',
+    'te-IN':'Telugu','bn-IN':'Bengali','gu-IN':'Gujarati','kn-IN':'Kannada',
+    'ml-IN':'Malayalam','mr-IN':'Marathi','pa-IN':'Punjabi','od-IN':'Odia','ur-IN':'Urdu'
+  }};
   g.innerHTML=demos.map(d=>`
     <div class="demo-card">
-      <div style="font-weight:700;font-size:15px;margin-bottom:6px;">🤖 ${{d.name}}</div>
-      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">🌐 ${{d.language}} · 📅 ${{new Date(d.created_at+'Z').toLocaleDateString()}}</div>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:12px;font-style:italic;">"${{(d.greeting||'').slice(0,80)}}"</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <div style="font-weight:700;font-size:15px;">🎙️ ${{d.label||d.name||'Demo Link'}}</div>
+        <span style="font-size:11px;background:rgba(108,99,255,0.15);color:#a78bfa;padding:2px 8px;border-radius:20px;">
+          ${{LANG_NAMES[d.language||'auto']||d.language||'Auto'}}
+        </span>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">
+        🔗 /demo/${{d.slug||d.token}} &nbsp;·&nbsp; 📞 ${{d.total_sessions||0}} sessions &nbsp;·&nbsp;
+        <span style="color:${{d.is_active?'#22c55e':'#ef4444'}}">●${{d.is_active?' Active':' Inactive'}}</span>
+      </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button class="btn btn-primary btn-sm" onclick="copyDemo('${{d.token}}')">📋 Copy Link</button>
-        <a class="btn btn-ghost btn-sm" href="/demo/${{d.token}}" target="_blank" style="text-decoration:none;">👁 Preview</a>
-        <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="deleteDemo('${{d.token}}')">🗑</button>
+        <button class="btn btn-primary btn-sm" onclick="copyDemo('${{d.slug||d.token}}')">📋 Copy Link</button>
+        <a class="btn btn-ghost btn-sm" href="/demo/${{d.slug||d.token}}" target="_blank" style="text-decoration:none;">👁 Preview</a>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="deleteDemo('${{d.slug||d.token}}')">🗑 Deactivate</button>
       </div>
     </div>`).join('');
 }}
@@ -1769,7 +1791,7 @@ function closeDemoModal() {{ document.getElementById('demo-modal').classList.rem
 async function createDemo() {{
   const g=id=>{{ const e=document.getElementById(id); return e?e.value:''; }};
   await fetch('/api/demo/create',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-    body:JSON.stringify({{name:g('dm-name'),phone_number:g('dm-phone'),language:g('dm-language'),greeting:g('dm-greeting')}})}});
+    body:JSON.stringify({{label:g('dm-name'),language:g('dm-language')}})}});
   closeDemoModal(); loadDemos();
 }}
 

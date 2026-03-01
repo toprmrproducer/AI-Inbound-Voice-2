@@ -46,10 +46,13 @@ def init_db():
                     id SERIAL PRIMARY KEY,
                     slug TEXT UNIQUE NOT NULL,
                     label TEXT,
+                    language TEXT DEFAULT 'auto',
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     is_active BOOLEAN DEFAULT TRUE,
                     total_sessions INTEGER DEFAULT 0
                 );
+                -- Safe migration: add language column to existing tables
+                ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto';
                 CREATE INDEX IF NOT EXISTS idx_call_transcripts_room
                     ON call_transcripts (call_room_id);
                 CREATE INDEX IF NOT EXISTS idx_call_logs_phone
