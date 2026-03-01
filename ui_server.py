@@ -130,18 +130,19 @@ async def api_get_logs():
 
 @app.get("/api/logs/{log_id}/transcript")
 async def api_get_transcript(log_id: str):
-    config = read_config()
-    os.environ["SUPABASE_URL"] = config.get("supabase_url", "")
-    os.environ["SUPABASE_KEY"] = config.get("supabase_key", "")
     import db
     try:
-        from supabase import create_client
-        supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-        res = supabase.table("call_logs").select("*").eq("id", log_id).single().execute()
-        data = res.data
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        with psycopg2.connect(os.environ["DATABASE_URL"]) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM call_logs WHERE id = %s", (log_id,))
+                data = dict(cur.fetchone() or {})
+        if not data:
+            return PlainTextResponse(content="Log not found", status_code=404)
         text = f"Call Log — {data.get('created_at', '')}\n"
-        text += f"Phone: {data.get('phone_number', 'Unknown')}\n"
-        text += f"Duration: {data.get('duration_seconds', 0)}s\n"
+        text += f"Phone: {data.get('phone', 'Unknown')}\n"
+        text += f"Duration: {data.get('duration', 0)}s\n"
         text += f"Summary: {data.get('summary', '')}\n\n"
         text += "--- TRANSCRIPT ---\n"
         text += data.get("transcript", "No transcript available.")
@@ -152,9 +153,6 @@ async def api_get_transcript(log_id: str):
 
 @app.get("/api/bookings")
 async def api_get_bookings():
-    config = read_config()
-    os.environ["SUPABASE_URL"] = config.get("supabase_url", "")
-    os.environ["SUPABASE_KEY"] = config.get("supabase_key", "")
     import db
     try:
         return db.fetch_bookings()
@@ -164,11 +162,6 @@ async def api_get_bookings():
 
 @app.get("/api/stats")
 async def api_get_stats():
-    config = read_config()
-    if not os.environ.get("SUPABASE_URL"):
-        os.environ["SUPABASE_URL"] = config.get("supabase_url", "")
-    if not os.environ.get("SUPABASE_KEY"):
-        os.environ["SUPABASE_KEY"] = config.get("supabase_key", "")
     import db
     try:
         return db.fetch_stats()
@@ -179,37 +172,26 @@ async def api_get_stats():
 @app.get("/api/contacts")
 async def api_get_contacts():
     """CRM endpoint — groups call_logs by phone number, deduplicates into contacts."""
-    config = read_config()
-    os.environ["SUPABASE_URL"] = config.get("supabase_url", "")
-    os.environ["SUPABASE_KEY"] = config.get("supabase_key", "")
+    import db
     try:
-        from supabase import create_client
-        supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-        res = supabase.table("call_logs") \
-            .select("phone_number, caller_name, summary, created_at") \
-            .order("created_at", desc=True) \
-            .limit(500) \
-            .execute()
-        rows = res.data or []
+        rows = db.fetch_call_logs(limit=500)
 
         # Deduplicate by phone number
         contacts: dict = {}
         for r in rows:
-            phone = r.get("phone_number") or "unknown"
+            phone = r.get("phone") or r.get("phone_number") or "unknown"
             if phone not in contacts:
                 contacts[phone] = {
                     "phone_number": phone,
                     "caller_name": r.get("caller_name") or "",
                     "total_calls": 0,
-                    "last_seen": r.get("created_at"),
+                    "last_seen": str(r.get("created_at", "")),
                     "is_booked": False,
                 }
             c = contacts[phone]
             c["total_calls"] += 1
-            # Use the most recent non-empty name
             if not c["caller_name"] and r.get("caller_name"):
                 c["caller_name"] = r["caller_name"]
-            # Mark booked if any call had a confirmed booking
             if r.get("summary") and "Confirmed" in r.get("summary", ""):
                 c["is_booked"] = True
 

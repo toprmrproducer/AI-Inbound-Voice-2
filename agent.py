@@ -490,12 +490,13 @@ async def entrypoint(ctx: JobContext):
     # #15 — Caller memory: inject last call summary into prompt
     async def get_caller_history(phone: str) -> str:
         try:
-            from supabase import create_client
-            sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-            result = sb.table("call_logs").select("summary, created_at").eq("phone", phone).order("created_at", desc=True).limit(1).execute()
-            if result.data:
-                last = result.data[0]
-                return f"\n\n[CALLER HISTORY: Last call on {last['created_at'][:10]}. Summary: {last['summary']}]"
+            from db import fetch_call_logs
+            logs = fetch_call_logs(limit=1)
+            # filter for this phone number
+            matching = [l for l in logs if l.get("phone") == phone]
+            if matching:
+                last = matching[0]
+                return f"\n\n[CALLER HISTORY: Last call on {str(last.get('created_at', ''))[:10]}. Summary: {last.get('summary', '')}]"
         except Exception as e:
             logger.warning(f"[MEMORY] Could not load caller history: {e}")
         return ""
@@ -607,23 +608,13 @@ async def entrypoint(ctx: JobContext):
     logger.info("[AGENT] Session live — waiting for caller audio.")
     call_start_time = datetime.now()
 
-    # #38 — Track active call in Supabase
+    # #38 — Track active call (in-memory log; no separate DB table needed)
     async def upsert_active_call(status: str):
-        try:
-            from supabase import create_client
-            sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-            sb.table("active_calls").upsert({
-                "room_id": ctx.room.name, "phone": caller_phone,
-                "caller_name": caller_name, "status": status,
-                "last_updated": datetime.utcnow().isoformat(),
-            }).execute()
-        except Exception as e:
-            logger.debug(f"[ACTIVE-CALL] {e}")
+        logger.info(f"[ACTIVE-CALL] {ctx.room.name} status={status}")
     asyncio.create_task(upsert_active_call("active"))
 
-    # ── Start call recording → Supabase Storage (S3-compatible) ───────────────
-    # Requires: SUPABASE_S3_ACCESS_KEY, SUPABASE_S3_SECRET_KEY, SUPABASE_S3_ENDPOINT
-    # Set these in Coolify/env after creating the 'call-recordings' Supabase bucket.
+    # ── Start call recording → Cloudflare R2 (via LiveKit egress) ─────────────
+    # Requires: R2_ACCESS_KEY, R2_SECRET_KEY, R2_ENDPOINT, R2_BUCKET in env.
     egress_id = None
     try:
         rec_api = api.LiveKitAPI(
@@ -639,12 +630,12 @@ async def entrypoint(ctx: JobContext):
                     file_type=api.EncodedFileType.OGG,
                     filepath=f"recordings/{ctx.room.name}.ogg",
                     s3=api.S3Upload(
-                        access_key=os.environ["SUPABASE_S3_ACCESS_KEY"],
-                        secret=os.environ["SUPABASE_S3_SECRET_KEY"],
-                        bucket="call-recordings",
-                        region=os.environ.get("SUPABASE_S3_REGION", "ap-south-1"),
-                        endpoint=os.environ["SUPABASE_S3_ENDPOINT"],
-                        force_path_style=True,
+                        access_key=os.environ.get("R2_ACCESS_KEY", ""),
+                        secret=os.environ.get("R2_SECRET_KEY", ""),
+                        bucket=os.environ.get("R2_BUCKET", "call-recordings"),
+                        region="auto",
+                        endpoint=os.environ.get("R2_ENDPOINT", ""),
+                        force_path_style=False,
                     )
                 )]
             )
@@ -728,11 +719,8 @@ async def entrypoint(ctx: JobContext):
 
     async def _log_transcript_to_db(room_id, phone, role, content):
         try:
-            from supabase import create_client
-            sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-            sb.table("call_transcripts").insert({
-                "call_room_id": room_id, "phone": phone, "role": role, "content": content,
-            }).execute()
+            from db import log_transcript_line
+            log_transcript_line(room_id, phone, role, content)
         except Exception:
             pass
 
@@ -853,8 +841,7 @@ async def entrypoint(ctx: JobContext):
                 )
                 await stop_api.aclose()
                 recording_url = (
-                    f"{os.environ.get('SUPABASE_URL', '')}/storage/v1/object/public/"
-                    f"call-recordings/recordings/{ctx.room.name}.ogg"
+                    f"{os.environ.get('R2_PUBLIC_URL', '')}/recordings/{ctx.room.name}.ogg"
                 )
                 logger.info(f"[RECORDING] Stopped. URL: {recording_url}")
             except Exception as e:
@@ -871,7 +858,6 @@ async def entrypoint(ctx: JobContext):
             transcript=transcript_text,
             summary=booking_status_msg,
             recording_url=recording_url,
-            caller_name=agent_tools.caller_name or "",
             sentiment=sentiment,
             interrupt_count=interrupt_count,
             estimated_cost_usd=estimated_cost,
@@ -879,6 +865,8 @@ async def entrypoint(ctx: JobContext):
             call_hour=call_dt.hour,
             call_day_of_week=call_dt.strftime("%A"),
             was_booked=bool(agent_tools.booking_intent),
+            stt_provider=live_config.get("stt_provider", "sarvam"),
+            tts_provider=live_config.get("tts_provider", "sarvam"),
         )
 
         # #38 — Mark call as completed
@@ -942,6 +930,12 @@ async def entrypoint(ctx: JobContext):
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    # Initialise the database schema on startup (idempotent)
+    try:
+        from db import init_db
+        init_db()
+    except Exception as _db_err:
+        logging.getLogger("agent").warning(f"[DB] init_db skipped: {_db_err}")
     cli.run_app(WorkerOptions(
         entrypoint_fnc=entrypoint,
         agent_name="outbound-caller" 
