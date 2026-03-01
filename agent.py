@@ -383,6 +383,45 @@ class OutboundAssistant(Agent):
         )
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEMO SESSION (Browser-based LiveKit call)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def run_demo_session(ctx: JobContext):
+    """
+    Handles a browser-based demo call via LiveKit WebRTC.
+    Visitor has already joined the room from /demo/<slug>.
+    Uses the same voice pipeline as regular inbound calls.
+    """
+    logger.info(f"[DEMO] Browser demo session in room: {ctx.room.name}")
+    live_config  = read_live_config()
+    llm_model    = live_config.get("llm_model",    "gpt-4o-mini")
+    tts_language = live_config.get("tts_language", "hi-IN")
+    tts_voice    = live_config.get("tts_voice",    "rohan")
+    stt_language = live_config.get("stt_language", "hi-IN")
+    first_line   = live_config.get("first_line",   "Namaste! Welcome. How can I help you today?")
+
+    session = AgentSession(
+        stt=sarvam.STT(model="saaras:v3", language=stt_language, mode="translate"),
+        llm=openai.LLM(model=llm_model),
+        tts=sarvam.TTS(model="bulbul:v3", speaker=tts_voice, target_language_code=tts_language),
+        turn_detection="stt",
+        allow_interruptions=True,
+    )
+
+    agent = MedSpaAgent(
+        instructions=live_config.get("agent_instructions", ""),
+        first_line=first_line,
+    )
+
+    await session.start(room=ctx.room, agent=agent)
+    await session.say(first_line, allow_interruptions=True)
+    logger.info("[DEMO] Session live.")
+    await session.wait_for_disconnect()
+    logger.info(f"[DEMO] Session ended: {ctx.room.name}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # JOB ENTRYPOINT
 # ══════════════════════════════════════════════════════════════════════════════
@@ -390,6 +429,14 @@ class OutboundAssistant(Agent):
 async def entrypoint(ctx: JobContext):
     logger.info(f"[JOB] id={ctx.job.id}")
     logger.info(f"[JOB] raw metadata='{ctx.job.metadata}'")
+
+    # ── Demo-room routing: browser WebRTC sessions ───────────────────────
+    # Connect first so we can read ctx.room.name
+    await ctx.connect()
+    logger.info(f"[ROOM] Connected: {ctx.room.name}")
+    if ctx.room.name.startswith("demo-"):
+        await run_demo_session(ctx)
+        return
 
     # ── Parse metadata ─────────────────────────────────────────────────────
     phone_number = None
@@ -418,9 +465,7 @@ async def entrypoint(ctx: JobContext):
         logger.warning(f"[RATE-LIMIT] Blocked {caller_phone} — too many calls in window")
         return
 
-    # ── Connect to LiveKit room ────────────────────────────────────────────
-    await ctx.connect()
-    logger.info(f"[ROOM] Connected: {ctx.room.name}")
+    # ── (already connected above for demo routing) ──────────────────────
 
     # ── Outbound: dial via Vobiz SIP trunk ────────────────────────────────
     if call_type == "outbound" and phone_number:

@@ -284,55 +284,290 @@ async def api_bulk_stop(job_id: str):
         bulk_campaigns[job_id]["status"] = "stopped"
     return {"status": "stopped"}
 
-# ── Demo Link Endpoints ────────────────────────────────────────────────────────
+# ── Demo Link Endpoints (PostgreSQL-backed) ───────────────────────────────────
+
+import secrets, string as _string
+import psycopg2
+from psycopg2.extras import RealDictCursor as _RDC
+from db import get_conn as _get_conn
 
 @app.get("/api/demo/list")
 async def api_demo_list():
-    return read_json_file(DEMO_FILE, [])
+    try:
+        with _get_conn() as conn:
+            with conn.cursor(cursor_factory=_RDC) as cur:
+                cur.execute("SELECT * FROM demo_links ORDER BY created_at DESC")
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"[DEMO] list failed: {e}")
+        return []
 
 @app.post("/api/demo/create")
 async def api_demo_create(request: Request):
-    data = await request.json()
-    links = read_json_file(DEMO_FILE, [])
-    token = str(uuid.uuid4())[:8]
-    link = {
-        "token": token,
-        "name": data.get("name", "Demo Agent"),
-        "phone_number": data.get("phone_number", ""),
-        "language": data.get("language", "Hinglish"),
-        "greeting": data.get("greeting", ""),
-        "created_at": datetime.utcnow().isoformat()
-    }
-    links.append(link)
-    write_json_file(DEMO_FILE, links)
-    return link
+    body = await request.json()
+    label = body.get("label") or body.get("name", "Demo Link")
+    slug = ''.join(secrets.choice(_string.ascii_lowercase + _string.digits) for _ in range(8))
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO demo_links (slug, label) VALUES (%s, %s) RETURNING id, slug",
+                    (slug, label)
+                )
+                row = cur.fetchone()
+                conn.commit()
+        base_url = os.getenv("PUBLIC_BASE_URL", "")
+        return {"slug": row[1], "url": f"{base_url}/demo/{row[1]}", "label": label, "token": row[1]}
+    except Exception as e:
+        logger.error(f"[DEMO] create failed: {e}")
+        raise HTTPException(500, str(e))
 
-@app.delete("/api/demo/{token}")
-async def api_demo_delete(token: str):
-    links = read_json_file(DEMO_FILE, [])
-    links = [l for l in links if l["token"] != token]
-    write_json_file(DEMO_FILE, links)
-    return {"status": "deleted"}
+@app.get("/api/demo/token/{slug}")
+async def api_demo_token(slug: str):
+    """Generate a LiveKit JWT for a browser visitor joining a demo room."""
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT is_active FROM demo_links WHERE slug = %s", (slug,))
+                row = cur.fetchone()
+                if not row or not row[0]:
+                    raise HTTPException(404, "Demo link not found or inactive")
+                cur.execute(
+                    "UPDATE demo_links SET total_sessions = total_sessions + 1 WHERE slug = %s",
+                    (slug,)
+                )
+                conn.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[DEMO] token DB error: {e}")
+        raise HTTPException(500, str(e))
 
-@app.get("/demo/{token}", response_class=HTMLResponse)
-async def demo_page(token: str):
-    links = read_json_file(DEMO_FILE, [])
-    link = next((l for l in links if l["token"] == token), None)
-    if not link:
-        return HTMLResponse("<h1>Demo link not found or expired.</h1>", status_code=404)
-    name = link.get("name", "AI Voice Agent")
-    phone = link.get("phone_number", "")
-    lang = link.get("language", "Hinglish")
-    greeting = link.get("greeting", "Namaste! How can I help you today?")
-    return HTMLResponse(f"""<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>
-<meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>{name} — AI Demo</title>
-<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap' rel='stylesheet'>
-<style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#0f1117 0%,#1a1f35 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;color:#e2e8f0}}.card{{background:rgba(28,35,51,0.95);border:1px solid #2a3448;border-radius:24px;padding:48px 40px;max-width:480px;width:90%;text-align:center;box-shadow:0 24px 80px rgba(0,0,0,0.5)}}.logo{{width:72px;height:72px;background:linear-gradient(135deg,#6c63ff,#a78bfa);border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 24px;font-size:36px}}.title{{font-size:28px;font-weight:700;margin-bottom:8px}}.lang{{font-size:13px;color:#6c63ff;font-weight:600;background:rgba(108,99,255,0.12);padding:4px 14px;border-radius:20px;display:inline-block;margin-bottom:24px}}.greeting{{background:rgba(255,255,255,0.04);border:1px solid #2a3448;border-radius:12px;padding:20px;margin-bottom:32px;font-size:15px;color:#94a3b8;line-height:1.6;font-style:italic}}.phone-btn{{display:inline-flex;align-items:center;gap:10px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;padding:16px 32px;border-radius:14px;font-size:18px;font-weight:700;text-decoration:none;transition:transform 0.15s,box-shadow 0.15s}}.phone-btn:hover{{transform:scale(1.04);box-shadow:0 8px 30px rgba(34,197,94,0.35)}}.powered{{margin-top:32px;font-size:11px;color:#475569}}</style></head>
-<body><div class='card'><div class='logo'>🤖</div><div class='title'>{name}</div><div class='lang'>🌐 {lang}</div>
-<div class='greeting'>💬 "{greeting}"</div>
-{'<a class="phone-btn" href="tel:' + phone + '">📞 Call ' + phone + '</a>' if phone else '<div style="color:#64748b">No phone number configured</div>'}
-<div class='powered'>Powered by AI Voice Agent Platform</div></div></body></html>""")
+    room_name = f"demo-{slug}-{secrets.token_hex(4)}"
+    lk_api_key    = os.getenv("LIVEKIT_API_KEY", "")
+    lk_api_secret = os.getenv("LIVEKIT_API_SECRET", "")
+    lk_url        = os.getenv("LIVEKIT_URL", "")
+
+    try:
+        from livekit.api import AccessToken, VideoGrants
+        token = (
+            AccessToken(lk_api_key, lk_api_secret)
+            .with_identity(f"visitor-{secrets.token_hex(4)}")
+            .with_name("Demo Visitor")
+            .with_grants(VideoGrants(
+                room_join=True,
+                room=room_name,
+                can_publish=True,
+                can_subscribe=True,
+                can_publish_data=True,
+            ))
+            .to_jwt()
+        )
+    except Exception as e:
+        logger.error(f"[DEMO] JWT error: {e}")
+        raise HTTPException(500, f"Token generation failed: {e}")
+
+    return {"token": token, "room": room_name, "ws_url": lk_url}
+
+@app.delete("/api/demo/{slug}")
+async def api_demo_delete(slug: str):
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE demo_links SET is_active = FALSE WHERE slug = %s", (slug,))
+                conn.commit()
+        return {"status": "deactivated"}
+    except Exception as e:
+        logger.error(f"[DEMO] delete failed: {e}")
+        raise HTTPException(500, str(e))
+
+@app.get("/demo/{slug}", response_class=HTMLResponse)
+async def demo_page(slug: str):
+    """Serve the visitor-facing browser demo page."""
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT label, is_active FROM demo_links WHERE slug = %s", (slug,))
+                row = cur.fetchone()
+    except Exception:
+        row = None
+
+    if not row or not row[1]:
+        return HTMLResponse(
+            "<h2 style='font-family:sans-serif;text-align:center;margin-top:20vh'>"
+            "This demo link is invalid or has expired.</h2>",
+            status_code=404
+        )
+
+    label = (row[0] or "AI Voice Agent").replace('"', '&quot;').replace("'", "&#39;")
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{label} \u2014 Live AI Demo</title>
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.5/dist/livekit-client.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: linear-gradient(135deg, #0d1117 0%, #161b27 60%, #0d1117 100%);
+            color: #e6edf3;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .card {{
+            background: rgba(22, 27, 39, 0.95);
+            border: 1px solid rgba(108,99,255,0.2);
+            border-radius: 24px;
+            padding: 52px 44px;
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 32px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(108,99,255,0.05);
+            backdrop-filter: blur(20px);
+        }}
+        .logo {{
+            width: 80px; height: 80px;
+            background: linear-gradient(135deg, #6c63ff, #a78bfa);
+            border-radius: 22px;
+            display: flex; align-items: center; justify-content: center;
+            margin: 0 auto 28px;
+            font-size: 38px;
+            box-shadow: 0 8px 32px rgba(108,99,255,0.35);
+        }}
+        h1 {{ font-size: 26px; font-weight: 700; margin-bottom: 10px; }}
+        .subtitle {{
+            color: #8b949e; font-size: 15px; margin-bottom: 44px; line-height: 1.6;
+        }}
+        .btn {{
+            display: inline-flex; align-items: center; justify-content: center;
+            gap: 10px; padding: 16px 40px; font-size: 16px; font-weight: 600;
+            border: none; border-radius: 50px; cursor: pointer;
+            transition: all 0.2s; width: 100%; font-family: inherit;
+        }}
+        .btn-start {{
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            color: white; box-shadow: 0 6px 24px rgba(99,102,241,0.4);
+        }}
+        .btn-start:hover:not(:disabled) {{ opacity: 0.88; transform: translateY(-2px); box-shadow: 0 10px 32px rgba(99,102,241,0.5); }}
+        .btn-stop {{ background: #ef4444; color: white; display: none; }}
+        .btn-stop:hover {{ background: #dc2626; }}
+        .btn:disabled {{ opacity: 0.45; cursor: not-allowed; transform: none !important; box-shadow: none !important; }}
+        .status-bar {{
+            margin-top: 24px; padding: 14px 20px; border-radius: 12px;
+            font-size: 14px; background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            color: #8b949e; min-height: 48px;
+            display: flex; align-items: center; justify-content: center; gap: 10px;
+        }}
+        .dot {{
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #484f58; flex-shrink: 0;
+        }}
+        .dot.live {{ background: #22c55e; animation: pulse 1.5s infinite; }}
+        .dot.connecting {{ background: #f59e0b; animation: pulse 0.7s infinite; }}
+        .dot.error {{ background: #ef4444; }}
+        @keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.25; }} }}
+        .hint {{ margin-top: 22px; font-size: 12px; color: #30363d; line-height: 1.7; }}
+        .powered {{ margin-top: 36px; font-size: 11px; color: #30363d; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="logo">🎙️</div>
+        <h1>{label}</h1>
+        <p class="subtitle">
+            Talk to our AI agent live — no phone number needed.<br>
+            Click below and allow microphone access to begin.
+        </p>
+
+        <button class="btn btn-start" id="startBtn" onclick="startDemo()">
+            ▶&nbsp; Start Conversation
+        </button>
+        <button class="btn btn-stop" id="stopBtn" onclick="stopDemo()">
+            ■&nbsp; End Call
+        </button>
+
+        <div class="status-bar" id="statusBar">
+            <div class="dot" id="statusDot"></div>
+            <span id="statusText">Ready — click to begin</span>
+        </div>
+
+        <p class="hint">🔒 Your audio is private and not permanently stored.<br>Microphone access is required to speak with the agent.</p>
+        <p class="powered">Powered by AI Voice Agent Platform</p>
+    </div>
+
+    <script>
+        const SLUG = "{slug}";
+        let room = null;
+
+        function setStatus(text, state) {{
+            document.getElementById('statusText').textContent = text;
+            const dot = document.getElementById('statusDot');
+            dot.className = 'dot' + (state ? ' ' + state : '');
+        }}
+
+        async function startDemo() {{
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn  = document.getElementById('stopBtn');
+            startBtn.disabled = true;
+            setStatus('Connecting\u2026', 'connecting');
+
+            try {{
+                const res = await fetch('/api/demo/token/' + SLUG);
+                if (!res.ok) throw new Error('Demo link expired or invalid.');
+                const {{ token, room: roomName, ws_url }} = await res.json();
+
+                room = new LivekitClient.Room({{
+                    adaptiveStream: true,
+                    dynacast: true,
+                }});
+
+                room.on(LivekitClient.RoomEvent.Disconnected, () => {{
+                    setStatus('Call ended.', '');
+                    startBtn.style.display = 'flex';
+                    startBtn.disabled = false;
+                    stopBtn.style.display = 'none';
+                }});
+
+                room.on(LivekitClient.RoomEvent.ParticipantConnected, (p) => {{
+                    if (p.identity && p.identity.startsWith('agent')) {{
+                        setStatus('Agent is live \u2014 speak now', 'live');
+                    }}
+                }});
+
+                room.on(LivekitClient.RoomEvent.ConnectionStateChanged, (state) => {{
+                    if (state === 'connected') setStatus('Waiting for agent to join\u2026', 'connecting');
+                }});
+
+                await room.connect(ws_url, token);
+                await room.localParticipant.setMicrophoneEnabled(true);
+                startBtn.style.display = 'none';
+                stopBtn.style.display = 'flex';
+
+            }} catch (err) {{
+                setStatus('\u26a0 ' + err.message, 'error');
+                startBtn.disabled = false;
+            }}
+        }}
+
+        async function stopDemo() {{
+            if (room) {{ await room.disconnect(); room = null; }}
+            document.getElementById('startBtn').style.display = 'flex';
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').style.display = 'none';
+            setStatus('Call ended \u2014 click to start again', '');
+        }}
+    </script>
+</body>
+</html>""")
 
 # ── Agent Management Endpoints ─────────────────────────────────────────────────
 

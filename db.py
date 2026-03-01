@@ -42,12 +42,22 @@ def init_db():
                     content TEXT,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
+                CREATE TABLE IF NOT EXISTS demo_links (
+                    id SERIAL PRIMARY KEY,
+                    slug TEXT UNIQUE NOT NULL,
+                    label TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    is_active BOOLEAN DEFAULT TRUE,
+                    total_sessions INTEGER DEFAULT 0
+                );
                 CREATE INDEX IF NOT EXISTS idx_call_transcripts_room
                     ON call_transcripts (call_room_id);
                 CREATE INDEX IF NOT EXISTS idx_call_logs_phone
                     ON call_logs (phone);
                 CREATE INDEX IF NOT EXISTS idx_call_logs_created
                     ON call_logs (created_at);
+                CREATE INDEX IF NOT EXISTS idx_demo_links_slug
+                    ON demo_links (slug);
             """)
             conn.commit()
     logger.info("[DB] Tables initialized successfully")
