@@ -428,6 +428,30 @@ async def get_dashboard():
     def sel(key, val):
         return "selected" if config.get(key) == val else ""
 
+    # ── HTML-escape all user-supplied text to prevent JS SyntaxErrors ─────────
+    import html as _html
+    def e(v):
+        """HTML-escape a value so it's safe inside HTML attributes and textarea."""
+        return _html.escape(str(v or ""), quote=True)
+
+    _first_line       = e(config.get("first_line", ""))
+    _agent_instr      = e(config.get("agent_instructions", ""))
+    _livekit_url      = e(config.get("livekit_url", ""))
+    _sip_trunk_id     = e(config.get("sip_trunk_id", ""))
+    _livekit_api_key  = e(config.get("livekit_api_key", ""))
+    _livekit_api_sec  = e(config.get("livekit_api_secret", ""))
+    _openai_key       = e(config.get("openai_api_key", ""))
+    _sarvam_key       = e(config.get("sarvam_api_key", ""))
+    _cal_key          = e(config.get("cal_api_key", ""))
+    _cal_event        = e(config.get("cal_event_type_id", ""))
+    _tg_token         = e(config.get("telegram_bot_token", ""))
+    _tg_chat          = e(config.get("telegram_chat_id", ""))
+    _supa_url         = e(config.get("supabase_url", ""))
+    _supa_key         = e(config.get("supabase_key", ""))
+    _n8n_url          = e(config.get("n8n_webhook_url", ""))
+    _stt_delay        = e(config.get("stt_min_endpointing_delay", 0.6))
+    _opening_greeting = e(config.get("opening_greeting", ""))
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -803,7 +827,7 @@ async def get_dashboard():
       <div class="section-title">Opening Greeting</div>
       <div class="form-group">
         <label>First Line (What the agent says when a call connects)</label>
-        <input type="text" id="first_line" value="{config.get('first_line', '')}" placeholder="Namaste! Welcome to Daisy's Med Spa...">
+        <input type="text" id="first_line" value="{_first_line}" placeholder="Namaste! Welcome to Daisy's Med Spa...">
         <div class="hint">This is the very first thing the agent says. Keep it concise and warm.</div>
       </div>
     </div>
@@ -811,7 +835,7 @@ async def get_dashboard():
       <div class="section-title">System Prompt</div>
       <div class="form-group">
         <label>Master System Prompt</label>
-        <textarea id="agent_instructions" rows="16" placeholder="Enter the AI's full personality and instructions...">{config.get('agent_instructions', '')}</textarea>
+        <textarea id="agent_instructions" rows="16" placeholder="Enter the AI's full personality and instructions...">{_agent_instr}</textarea>
         <div class="hint">Date and time context are injected automatically. Do not hardcode today's date.</div>
       </div>
     </div>
@@ -819,7 +843,7 @@ async def get_dashboard():
       <div class="section-title">Listening Sensitivity</div>
       <div class="form-group" style="max-width:220px;">
         <label>Endpointing Delay (seconds)</label>
-        <input type="number" id="stt_min_endpointing_delay" step="0.05" min="0.1" max="3.0" value="{config.get('stt_min_endpointing_delay', 0.6)}">
+        <input type="number" id="stt_min_endpointing_delay" step="0.05" min="0.1" max="3.0" value="{_stt_delay}">
         <div class="hint">Seconds the AI waits after silence before responding. Default: 0.6</div>
       </div>
     </div>
@@ -1014,28 +1038,28 @@ async def get_dashboard():
     <div class="section-card">
       <div class="section-title">LiveKit</div>
       <div class="form-row">
-        <div class="form-group"><label>LiveKit URL</label><input type="text" id="livekit_url" value="{config.get('livekit_url', '')}"></div>
-        <div class="form-group"><label>SIP Trunk ID</label><input type="text" id="sip_trunk_id" value="{config.get('sip_trunk_id', '')}"></div>
-        <div class="form-group"><label>API Key</label><input type="password" id="livekit_api_key" value="{config.get('livekit_api_key', '')}"></div>
-        <div class="form-group"><label>API Secret</label><input type="password" id="livekit_api_secret" value="{config.get('livekit_api_secret', '')}"></div>
+        <div class="form-group"><label>LiveKit URL</label><input type="text" id="livekit_url" value="{_livekit_url}"></div>
+        <div class="form-group"><label>SIP Trunk ID</label><input type="text" id="sip_trunk_id" value="{_sip_trunk_id}"></div>
+        <div class="form-group"><label>API Key</label><input type="password" id="livekit_api_key" value="{_livekit_api_key}"></div>
+        <div class="form-group"><label>API Secret</label><input type="password" id="livekit_api_secret" value="{_livekit_api_sec}"></div>
       </div>
     </div>
     <div class="section-card">
       <div class="section-title">AI Providers</div>
       <div class="form-row">
-        <div class="form-group"><label>OpenAI API Key</label><input type="password" id="openai_api_key" value="{config.get('openai_api_key', '')}"></div>
-        <div class="form-group"><label>Sarvam API Key</label><input type="password" id="sarvam_api_key" value="{config.get('sarvam_api_key', '')}"></div>
+        <div class="form-group"><label>OpenAI API Key</label><input type="password" id="openai_api_key" value="{_openai_key}"></div>
+        <div class="form-group"><label>Sarvam API Key</label><input type="password" id="sarvam_api_key" value="{_sarvam_key}"></div>
       </div>
     </div>
     <div class="section-card">
       <div class="section-title">Integrations</div>
       <div class="form-row">
-        <div class="form-group"><label>Cal.com API Key</label><input type="password" id="cal_api_key" value="{config.get('cal_api_key', '')}"></div>
-        <div class="form-group"><label>Cal.com Event Type ID</label><input type="text" id="cal_event_type_id" value="{config.get('cal_event_type_id', '')}"></div>
-        <div class="form-group"><label>Telegram Bot Token</label><input type="password" id="telegram_bot_token" value="{config.get('telegram_bot_token', '')}"></div>
-        <div class="form-group"><label>Telegram Chat ID</label><input type="text" id="telegram_chat_id" value="{config.get('telegram_chat_id', '')}"></div>
-        <div class="form-group"><label>Supabase URL</label><input type="text" id="supabase_url" value="{config.get('supabase_url', '')}"></div>
-        <div class="form-group"><label>Supabase Anon Key</label><input type="password" id="supabase_key" value="{config.get('supabase_key', '')}"></div>
+        <div class="form-group"><label>Cal.com API Key</label><input type="password" id="cal_api_key" value="{_cal_key}"></div>
+        <div class="form-group"><label>Cal.com Event Type ID</label><input type="text" id="cal_event_type_id" value="{_cal_event}"></div>
+        <div class="form-group"><label>Telegram Bot Token</label><input type="password" id="telegram_bot_token" value="{_tg_token}"></div>
+        <div class="form-group"><label>Telegram Chat ID</label><input type="text" id="telegram_chat_id" value="{_tg_chat}"></div>
+        <div class="form-group"><label>Supabase URL</label><input type="text" id="supabase_url" value="{_supa_url}"></div>
+        <div class="form-group"><label>Supabase Anon Key</label><input type="password" id="supabase_key" value="{_supa_key}"></div>
       </div>
     </div>
     <div class="save-bar">
@@ -1450,7 +1474,7 @@ async function dispatchSingleCall() {{
 
 async function startBulkCampaign() {{
   const raw=(document.getElementById('bulk-phones')||{{}}).value||'';
-  const numbers=raw.split('\n').map(n=>n.trim()).filter(Boolean);
+  const numbers=raw.split(String.fromCharCode(10)).map(n=>n.trim()).filter(Boolean);
   if (!numbers.length) return;
   const res = await fetch('/api/call/bulk',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{numbers}})}});
   const d = await res.json();
