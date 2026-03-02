@@ -591,7 +591,7 @@ async def run_demo_session(ctx: JobContext):
     # End when the room disconnects
     import asyncio
     from livekit import rtc
-    while ctx.room.connection_state == rtc.ConnectionState.CONNECTION_STATE_CONNECTED:
+    while ctx.room.connection_state == rtc.ConnectionState.CONNECTED:
         await asyncio.sleep(0.5)
 
     logger.info(f"[DEMO] Room disconnected, ending job: {ctx.room.name}")
