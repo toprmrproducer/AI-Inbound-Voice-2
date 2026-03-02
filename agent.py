@@ -588,12 +588,13 @@ async def run_demo_session(ctx: JobContext):
     await session.say(greeting, allow_interruptions=True)
     logger.info("[DEMO] Session live.")
     
-    # Keep job alive while room is connected (2 = CONNECTED)
+    # Keep job alive until cancelled by LiveKit
     import asyncio
-    while int(ctx.room.connection_state) == 2:
-        await asyncio.sleep(0.5)
-
-    logger.info(f"[DEMO] Room disconnected, ending job: {ctx.room.name}")
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        logger.info(f"[DEMO] Job cancelled, shutting down: {ctx.room.name}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
