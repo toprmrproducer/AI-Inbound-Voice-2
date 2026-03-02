@@ -587,7 +587,13 @@ async def run_demo_session(ctx: JobContext):
     greeting = live_config.get("first_line") or get_multilingual_greeting("auto")
     await session.say(greeting, allow_interruptions=True)
     logger.info("[DEMO] Session live.")
-    await ctx.wait_for_disconnect()
+    
+    # Wait until browser client leaves the room
+    import asyncio
+    local_participant = ctx.room.local_participant
+    while local_participant.is_connected:
+        await asyncio.sleep(0.5)
+        
     logger.info(f"[DEMO] Session ended: {ctx.room.name}")
 
 
