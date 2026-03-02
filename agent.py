@@ -157,6 +157,12 @@ CRITICAL LANGUAGE RULE — NON-NEGOTIABLE:
 You MUST speak ONLY in {lang_name}.
 NEVER switch to Hindi, English, or any other language.
 Even if the user mixes languages, ALWAYS reply in {lang_name}.
+
+CRITICAL RESPONSE FORMAT FOR VOICE:
+- NEVER generate more than ONE sentence at a time
+- Each response must be maximum 15 words
+- Do NOT use compound sentences joined by "and" or "but"
+- Short sentences = faster interruption for the user
 If a medical term has no {lang_name} equivalent, say it in English only for that word.
 Language: {lang_name} ONLY.
 ═══════════════════════════════════════════
@@ -420,7 +426,14 @@ class OutboundAssistant(Agent):
         self._live_config = live_config or get_live_config()
         base_instructions = self._live_config.get("agent_instructions", "")
         ist_context = get_ist_time_context()
-        final_instructions = base_instructions + ist_context
+        voice_format = """
+CRITICAL RESPONSE FORMAT FOR VOICE:
+- NEVER generate more than ONE sentence at a time
+- Each response must be maximum 15 words
+- Do NOT use compound sentences joined by "and" or "but"
+- Short sentences = faster interruption for the user
+"""
+        final_instructions = base_instructions + ist_context + voice_format
         # #11 — Token counter
         try:
             import tiktoken
@@ -526,18 +539,44 @@ async def run_demo_session(ctx: JobContext):
         first_line=first_line,
     )
 
+
+    from livekit.plugins import silero
+    vad = silero.VAD.load(
+        min_speech_duration=0.05,
+        min_silence_duration=0.8,
+        activation_threshold=0.55,
+        deactivation_threshold=0.40,
+        prefix_padding_duration=0.1,
+    )
+
     session = AgentSession(
-        # language="unknown" → Saaras v3 auto-detects from first utterance
         stt=sarvam.STT(model="saaras:v3", language="unknown", mode="transcribe"),
         llm=openai.LLM(model=llm_model),
         tts=sarvam.TTS(
             model="bulbul:v3",
-            speaker=get_lang_config("hi-IN")["speaker"],   # default until detected
+            speaker=get_lang_config("hi-IN")["speaker"],
             target_language_code="hi-IN",
+            enable_preprocessing=True,
+            pace=0.95,
         ),
+        vad=vad,
         turn_detection="stt",
+        min_interruption_duration=0.0,
+        min_interruption_words=0,
+        min_endpointing_delay=0.5,
+        preemptive_generation=True,
         allow_interruptions=True,
     )
+
+    @session.on("user_speech_started")
+    def on_user_speech_started_demo():
+        session.interrupt()
+        logger.info("[INTERRUPT] Hard interrupt triggered on speech start (demo)")
+
+    @session.on("user_speech_committed")
+    def on_user_speech_committed_demo(ev):
+        if getattr(ev, "transcript", "") and len(ev.transcript) > 2:
+            session.interrupt()
 
     # Give agent a reference to session so it can swap TTS on detection
     agent._session_ref = session
@@ -548,7 +587,7 @@ async def run_demo_session(ctx: JobContext):
     greeting = live_config.get("first_line") or get_multilingual_greeting("auto")
     await session.say(greeting, allow_interruptions=True)
     logger.info("[DEMO] Session live.")
-    await session.wait_for_disconnect()
+    await ctx.wait_for_disconnect()
     logger.info(f"[DEMO] Session ended: {ctx.room.name}")
 
 
@@ -722,6 +761,8 @@ async def entrypoint(ctx: JobContext):
             target_language_code=tts_language,
             model="bulbul:v3",
             speaker=tts_voice,
+            enable_preprocessing=True,
+            pace=0.95,
         )
 
     # ── Build agent ───────────────────────────────────────────────────────
@@ -731,12 +772,6 @@ async def entrypoint(ctx: JobContext):
     global agent_is_speaking
     agent_is_speaking = False
 
-    async def on_user_speech_started(session):
-        """Fires instantly when VAD detects user started speaking."""
-        global agent_is_speaking
-        if agent_is_speaking and session.current_speech:
-            await session.current_speech.interrupt()
-            logger.debug("[INTERRUPT] Cut off agent — user started speaking")
 
     def before_tts_cb(agent_response: str) -> str:
         """
@@ -758,14 +793,39 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"[AUDIO] BVC unavailable: {e}")
 
+
+    from livekit.plugins import silero
+    vad = silero.VAD.load(
+        min_speech_duration=0.05,
+        min_silence_duration=0.8,
+        activation_threshold=0.55,
+        deactivation_threshold=0.40,
+        prefix_padding_duration=0.1,
+    )
+
     session = AgentSession(
         stt=active_stt,
         llm=active_llm,
         tts=active_tts,
+        vad=vad,
         turn_detection="stt",
-        min_endpointing_delay=delay_setting,
+        min_interruption_duration=0.0,
+        min_interruption_words=0,
+        min_endpointing_delay=delay_setting if delay_setting else 0.5,
+        preemptive_generation=True,
         allow_interruptions=True,
     )
+
+    @session.on("user_speech_started")
+    def on_user_speech_started_main():
+        session.interrupt()
+        logger.info("[INTERRUPT] Hard interrupt triggered on speech start")
+
+    @session.on("user_speech_committed")
+    def on_user_speech_committed_main(ev):
+        if getattr(ev, "transcript", "") and len(ev.transcript) > 2:
+            session.interrupt()
+
 
     await session.start(
         room=ctx.room,
