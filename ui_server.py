@@ -350,12 +350,28 @@ async def api_demo_token(slug: str):
     lk_url        = os.getenv("LIVEKIT_URL", "")
 
     try:
-        from livekit.api import AccessToken, VideoGrants
+        from livekit import api as lk_api
+        import asyncio
+
+        # Step 1 — Create the room & Dispatch agent
+        async with lk_api.LiveKitAPI(lk_url, lk_api_key, lk_api_secret) as lk:
+            await lk.room.create_room(
+                lk_api.CreateRoomRequest(name=room_name)
+            )
+            await lk.agent_dispatch.create_dispatch(
+                lk_api.CreateAgentDispatchRequest(
+                    agent_name="outbound-caller",
+                    room=room_name,
+                    metadata="demo",
+                )
+            )
+
+        # Step 2 — Generate visitor token
         token = (
-            AccessToken(lk_api_key, lk_api_secret)
+            lk_api.AccessToken(lk_api_key, lk_api_secret)
             .with_identity(f"visitor-{secrets.token_hex(4)}")
             .with_name("Demo Visitor")
-            .with_grants(VideoGrants(
+            .with_grants(lk_api.VideoGrants(
                 room_join=True,
                 room=room_name,
                 can_publish=True,
@@ -365,7 +381,7 @@ async def api_demo_token(slug: str):
             .to_jwt()
         )
     except Exception as e:
-        logger.error(f"[DEMO] JWT error: {e}")
+        logger.error(f"[DEMO] Token/Dispatch error: {e}")
         raise HTTPException(500, f"Token generation failed: {e}")
 
     return {"token": token, "room": room_name, "ws_url": lk_url}

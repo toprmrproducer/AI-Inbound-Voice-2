@@ -564,7 +564,7 @@ async def entrypoint(ctx: JobContext):
     # Connect first so we can read ctx.room.name
     await ctx.connect()
     logger.info(f"[ROOM] Connected: {ctx.room.name}")
-    if ctx.room.name.startswith("demo-"):
+    if ctx.room.name.startswith("demo-") or ctx.job.metadata == "demo":
         await run_demo_session(ctx)
         return
 
