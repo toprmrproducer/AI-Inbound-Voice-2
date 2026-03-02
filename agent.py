@@ -588,13 +588,13 @@ async def run_demo_session(ctx: JobContext):
     await session.say(greeting, allow_interruptions=True)
     logger.info("[DEMO] Session live.")
     
-    # Wait until browser client leaves the room
+    # End when the room disconnects
     import asyncio
-    local_participant = ctx.room.local_participant
-    while local_participant.is_connected:
+    from livekit import rtc
+    while ctx.room.connection_state == rtc.ConnectionState.CONNECTION_STATE_CONNECTED:
         await asyncio.sleep(0.5)
-        
-    logger.info(f"[DEMO] Session ended: {ctx.room.name}")
+
+    logger.info(f"[DEMO] Room disconnected, ending job: {ctx.room.name}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
