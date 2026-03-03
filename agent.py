@@ -588,13 +588,16 @@ async def run_demo_session(ctx: JobContext):
     await session.say(greeting, allow_interruptions=True)
     logger.info("[DEMO] Session live.")
     
-    # Keep job alive until cancelled by LiveKit
+    # Wait for the browser participant to leave
     import asyncio
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        logger.info(f"[DEMO] Job cancelled, shutting down: {ctx.room.name}")
+    disconnect_event = asyncio.Event()
+
+    @ctx.room.on("participant_disconnected")
+    def on_disconnect(participant):
+        disconnect_event.set()
+
+    await disconnect_event.wait()
+    logger.info(f"[DEMO] Participant left, ending job: {ctx.room.name}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
