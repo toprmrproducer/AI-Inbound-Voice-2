@@ -284,12 +284,379 @@ async def api_bulk_stop(job_id: str):
         bulk_campaigns[job_id]["status"] = "stopped"
     return {"status": "stopped"}
 
+
+# ── Telephony API Routes ──────────────────────────────────────────────────────
+
+import csv as _csv
+import io as _io
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        import db
+        db.init_db()
+        logger.info("[STARTUP] Database initialized")
+    except Exception as e:
+        logger.warning(f"[STARTUP] DB init error: {e}")
+    try:
+        from campaign_scheduler import start_campaign_scheduler
+        start_campaign_scheduler()
+        logger.info("[STARTUP] Campaign scheduler started")
+    except Exception as e:
+        logger.warning(f"[STARTUP] Campaign scheduler error: {e}")
+
+
+# ── SIP Trunks ────────────────────────────────────────────────────────────────
+
+@app.get("/api/telephony/trunks")
+async def tel_list_trunks():
+    import db
+    return db.fetch_trunks()
+
+
+@app.get("/api/telephony/trunks/livekit/sync")
+async def tel_sync_livekit_trunks():
+    from sip_manager import list_outbound_trunks, list_inbound_trunks
+    outbound = await list_outbound_trunks()
+    inbound  = await list_inbound_trunks()
+    return {"outbound": outbound, "inbound": inbound}
+
+
+@app.post("/api/telephony/trunks/outbound")
+async def tel_create_outbound_trunk(request: Request):
+    data = await request.json()
+    from sip_manager import create_outbound_trunk as lk_create
+    try:
+        lk_id = await lk_create(
+            name=data["name"],
+            address=data.get("sip_address", ""),
+            numbers=data.get("number_pool", []),
+            username=data.get("auth_username", ""),
+            password=data.get("auth_password", ""),
+        )
+    except Exception as e:
+        raise HTTPException(500, f"LiveKit trunk creation failed: {e}")
+    import db
+    row = {
+        "name": data["name"],
+        "provider": data.get("provider", "vobiz"),
+        "trunk_type": "outbound",
+        "sip_address": data.get("sip_address", ""),
+        "auth_username": data.get("auth_username", ""),
+        "auth_password": data.get("auth_password", ""),
+        "number_pool": json.dumps(data.get("number_pool", [])),
+        "livekit_trunk_id": lk_id,
+        "max_concurrent_calls": int(data.get("max_concurrent_calls", 10)),
+        "max_calls_per_number_per_day": int(data.get("max_calls_per_number_per_day", 150)),
+        "notes": data.get("notes", ""),
+    }
+    result = db.insert_trunk(row)
+    # Convert JSONB back to list for JSON response
+    if isinstance(result.get("number_pool"), str):
+        try:
+            result["number_pool"] = json.loads(result["number_pool"])
+        except Exception:
+            result["number_pool"] = []
+    return result
+
+
+@app.post("/api/telephony/trunks/inbound")
+async def tel_create_inbound_trunk(request: Request):
+    data = await request.json()
+    from sip_manager import create_inbound_trunk as lk_create
+    try:
+        lk_id = await lk_create(
+            name=data["name"],
+            numbers=data.get("numbers", []),
+            allowed_addresses=data.get("allowed_addresses", []),
+        )
+    except Exception as e:
+        raise HTTPException(500, f"LiveKit inbound trunk creation failed: {e}")
+    import db
+    row = {
+        "name": data["name"],
+        "provider": data.get("provider", "vobiz"),
+        "trunk_type": "inbound",
+        "sip_address": "",
+        "number_pool": json.dumps(data.get("numbers", [])),
+        "livekit_trunk_id": lk_id,
+        "notes": data.get("notes", ""),
+    }
+    return db.insert_trunk(row)
+
+
+@app.delete("/api/telephony/trunks/{trunk_id}")
+async def tel_delete_trunk(trunk_id: str):
+    import db
+    trunks = db.fetch_trunks()
+    trunk = next((t for t in trunks if str(t.get("id")) == trunk_id), None)
+    if trunk and trunk.get("livekit_trunk_id"):
+        from sip_manager import delete_outbound_trunk, delete_inbound_trunk
+        try:
+            if trunk.get("trunk_type") == "outbound":
+                await delete_outbound_trunk(trunk["livekit_trunk_id"])
+            else:
+                await delete_inbound_trunk(trunk["livekit_trunk_id"])
+        except Exception as e:
+            logger.warning(f"LiveKit trunk delete failed (ignoring): {e}")
+    db.delete_trunk_by_id(trunk_id)
+    return {"success": True}
+
+
+# ── Agent Configs / Presets ───────────────────────────────────────────────────
+
+@app.get("/api/telephony/presets")
+async def tel_get_presets():
+    from presets import CALLING_PRESETS
+    return CALLING_PRESETS
+
+
+@app.get("/api/telephony/agent-configs")
+async def tel_list_agent_configs():
+    import db
+    return db.fetch_agent_configs()
+
+
+@app.post("/api/telephony/agent-configs")
+async def tel_create_agent_config(request: Request):
+    data = await request.json()
+    import db
+    return db.insert_agent_config(data)
+
+
+@app.post("/api/telephony/agent-configs/from-preset/{preset_type}")
+async def tel_create_from_preset(preset_type: str, request: Request):
+    from presets import CALLING_PRESETS
+    if preset_type not in CALLING_PRESETS:
+        raise HTTPException(404, f"Unknown preset: {preset_type}")
+    import db
+    data = {**CALLING_PRESETS[preset_type]}
+    try:
+        body = await request.json()
+        if body.get("sip_trunk_id"):
+            data["sip_trunk_id"] = body["sip_trunk_id"]
+    except Exception:
+        pass
+    return db.insert_agent_config(data)
+
+
+@app.put("/api/telephony/agent-configs/{config_id}")
+async def tel_update_agent_config(config_id: str, request: Request):
+    data = await request.json()
+    import db
+    return db.update_agent_config(config_id, data)
+
+
+@app.delete("/api/telephony/agent-configs/{config_id}")
+async def tel_delete_agent_config(config_id: str):
+    import db
+    db.soft_delete_agent_config(config_id)
+    return {"success": True}
+
+
+# ── Campaigns ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/telephony/campaigns")
+async def tel_list_campaigns():
+    import db
+    return db.fetch_campaigns()
+
+
+@app.post("/api/telephony/campaigns")
+async def tel_create_campaign(request: Request):
+    data = await request.json()
+    import db
+    return db.insert_campaign(data)
+
+
+@app.post("/api/telephony/campaigns/{cid}/start")
+async def tel_start_campaign(cid: str):
+    import db
+    db.update_campaign_status(cid, "active")
+    return {"status": "active"}
+
+
+@app.post("/api/telephony/campaigns/{cid}/pause")
+async def tel_pause_campaign(cid: str):
+    import db
+    db.update_campaign_status(cid, "paused")
+    return {"status": "paused"}
+
+
+@app.post("/api/telephony/campaigns/{cid}/resume")
+async def tel_resume_campaign(cid: str):
+    import db
+    db.update_campaign_status(cid, "active")
+    return {"status": "active"}
+
+
+@app.post("/api/telephony/campaigns/{cid}/cancel")
+async def tel_cancel_campaign(cid: str):
+    import db
+    db.update_campaign_status(cid, "cancelled")
+    return {"status": "cancelled"}
+
+
+@app.delete("/api/telephony/campaigns/{cid}")
+async def tel_delete_campaign(cid: str):
+    import db
+    db.delete_campaign_by_id(cid)
+    return {"success": True}
+
+
+# ── Leads ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/telephony/campaigns/{cid}/leads")
+async def tel_get_leads(cid: str, status: str = None, limit: int = 100, offset: int = 0):
+    import db
+    return db.fetch_campaign_leads(cid, status=status, limit=limit, offset=offset)
+
+
+@app.post("/api/telephony/campaigns/{cid}/leads")
+async def tel_add_leads(cid: str, request: Request):
+    data = await request.json()
+    leads = data.get("leads", [])
+    import db
+    added = db.insert_leads_bulk(cid, leads)
+    return {"added": added}
+
+
+@app.post("/api/telephony/campaigns/{cid}/leads/csv")
+async def tel_upload_leads_csv(cid: str, request: Request):
+    from fastapi import UploadFile, File
+    body = await request.body()
+    try:
+        text = body.decode("utf-8")
+    except Exception:
+        text = body.decode("latin-1")
+    reader = _csv.DictReader(_io.StringIO(text))
+    leads = []
+    for row in reader:
+        phone = row.get("phone", "").strip()
+        if not phone:
+            continue
+        leads.append({
+            "phone":       phone,
+            "name":        row.get("name", "").strip(),
+            "email":       row.get("email", "").strip(),
+            "custom_data": {k: v for k, v in row.items()
+                            if k not in ("phone", "name", "email")},
+        })
+    import db
+    added = db.insert_leads_bulk(cid, leads)
+    return {"added": added}
+
+
+@app.post("/api/telephony/campaigns/{cid}/leads/{lid}/dnc")
+async def tel_lead_to_dnc(cid: str, lid: str):
+    import db, psycopg2
+    from psycopg2.extras import RealDictCursor
+    with db.get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT phone FROM campaign_leads WHERE id = %s", (lid,))
+            row = cur.fetchone()
+    if row:
+        db.add_to_dnc(row["phone"], reason="user_request", source="campaign")
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_leads SET status = 'dnc' WHERE id = %s", (lid,))
+                conn.commit()
+    return {"success": True}
+
+
+# ── Single Call ───────────────────────────────────────────────────────────────
+
+@app.post("/api/telephony/call/single")
+async def tel_single_call(request: Request):
+    data = await request.json()
+    phone = data.get("phone", "").strip()
+    agent_config_id = data.get("agent_config_id", "")
+    name = data.get("name", "Caller")
+    if not phone:
+        raise HTTPException(400, "phone is required")
+    import db
+    configs = db.fetch_agent_configs()
+    config = next((c for c in configs if str(c.get("id")) == agent_config_id), None)
+    if not config:
+        raise HTTPException(404, "Agent config not found")
+    trunks_list = db.fetch_trunks()
+    trunk = next((t for t in trunks_list if str(t.get("id")) == str(config.get("sip_trunk_id", ""))), None)
+
+    async def _dial():
+        from campaign_scheduler import dispatch_lead as _dispatch
+        fake_lead = {"id": "single", "phone": phone, "name": name, "attempts": 0}
+        fake_campaign = {"id": "single", "name": "Single Call", "max_calls_per_minute": 1}
+        await _dispatch(fake_lead, fake_campaign, config, trunk or {})
+
+    asyncio.create_task(_dial())
+    return {"status": "dispatching", "phone": phone}
+
+
+# ── DNC ───────────────────────────────────────────────────────────────────────
+
+@app.get("/api/telephony/dnc")
+async def tel_list_dnc(limit: int = 200, offset: int = 0):
+    import db
+    return db.fetch_dnc(limit=limit, offset=offset)
+
+
+@app.post("/api/telephony/dnc")
+async def tel_add_dnc(request: Request):
+    data = await request.json()
+    phone = data.get("phone", "").strip()
+    if not phone:
+        raise HTTPException(400, "phone is required")
+    import db
+    db.add_to_dnc(phone, reason=data.get("reason", "manual"))
+    return {"success": True}
+
+
+@app.delete("/api/telephony/dnc/{phone}")
+async def tel_remove_dnc(phone: str):
+    import db
+    db.remove_from_dnc(phone)
+    return {"success": True}
+
+
+# ── Analytics ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/telephony/analytics/overview")
+async def tel_analytics_overview():
+    import db
+    return db.fetch_telephony_overview()
+
+
+@app.get("/api/telephony/analytics/daily")
+async def tel_analytics_daily(days: int = 14):
+    import db
+    return db.fetch_daily_analytics(days=days)
+
+
+@app.get("/api/telephony/analytics/campaign/{cid}")
+async def tel_campaign_analytics(cid: str):
+    import db
+    leads = db.fetch_campaign_leads(cid, limit=10000)
+    by_status: dict = {}
+    for lead in leads:
+        s = lead.get("status", "unknown")
+        by_status[s] = by_status.get(s, 0) + 1
+    return {
+        "total":         len(leads),
+        "by_status":     by_status,
+        "total_booked":  sum(1 for l in leads if l.get("booked")),
+        "avg_duration":  round(
+            sum(l.get("call_duration_seconds") or 0 for l in leads) / max(len(leads), 1)
+        ),
+    }
+
+
 # ── Demo Link Endpoints (PostgreSQL-backed) ───────────────────────────────────
 
 import secrets, string as _string
 import psycopg2
 from psycopg2.extras import RealDictCursor as _RDC
 from db import get_conn as _get_conn
+
 
 @app.get("/api/demo/list")
 async def api_demo_list():
@@ -1023,6 +1390,12 @@ async def get_dashboard():
     <div class="nav-section" style="margin-top:12px;">Data</div>
     <div class="nav-item" onclick="goTo('logs', this); loadLogs();"><span class="icon">📞</span> Call Logs</div>
     <div class="nav-item" onclick="goTo('crm', this); loadCRM();"><span class="icon">👥</span> CRM Contacts</div>
+    <div class="nav-section" style="margin-top:12px;">Mass Calling</div>
+    <div class="nav-item" onclick="goTo('tel-overview', this); loadTelOverview();"><span class="icon">📊</span> Telephony Overview</div>
+    <div class="nav-item" onclick="goTo('tel-trunks', this); loadTrunks();"><span class="icon">🔌</span> SIP Trunks</div>
+    <div class="nav-item" onclick="goTo('tel-presets', this); loadAgentConfigs();"><span class="icon">🤖</span> Agent Presets</div>
+    <div class="nav-item" onclick="goTo('tel-campaigns', this); loadCampaigns();"><span class="icon">📢</span> Campaigns</div>
+    <div class="nav-item" onclick="goTo('tel-dnc', this); loadDNC();"><span class="icon">🚫</span> DNC List</div>
   </div>
   <div class="sidebar-footer">
     <span class="status-dot pulse"></span>Agent Online
@@ -1291,6 +1664,206 @@ async def get_dashboard():
     </div>
   </div>
 
+  <!-- ── Telephony Overview ── -->
+  <div id="page-tel-overview" class="page">
+    <div class="page-header">
+      <div class="page-title">📊 Telephony Overview</div>
+      <div class="page-sub">Mass outbound calling — campaigns, trunks, analytics</div>
+    </div>
+    <div class="stat-grid" id="tel-stat-grid">
+      <div class="stat-card"><div class="stat-label">Total Campaigns</div><div class="stat-value" id="tel-stat-campaigns">—</div><div class="stat-sub">All time</div></div>
+      <div class="stat-card"><div class="stat-label">Active Campaigns</div><div class="stat-value" id="tel-stat-active">—</div><div class="stat-sub">Running now</div></div>
+      <div class="stat-card"><div class="stat-label">Outbound Today</div><div class="stat-value" id="tel-stat-today">—</div><div class="stat-sub">Calls placed today</div></div>
+      <div class="stat-card"><div class="stat-label">DNC Count</div><div class="stat-value" id="tel-stat-dnc">—</div><div class="stat-sub">Do Not Call list</div></div>
+    </div>
+    <div class="section-card" style="margin-top:20px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div class="section-title" style="border:none;padding:0;margin:0;">14-Day Call Volume</div>
+        <button class="btn btn-ghost btn-sm" onclick="loadTelOverview()">↻ Refresh</button>
+      </div>
+      <div id="tel-chart-container" style="overflow-x:auto;">
+        <div id="tel-chart-bars" style="display:flex;align-items:flex-end;gap:6px;height:120px;padding:0 4px;"></div>
+        <div id="tel-chart-labels" style="display:flex;gap:6px;margin-top:4px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SIP Trunks ── -->
+  <div id="page-tel-trunks" class="page">
+    <div class="page-header">
+      <div class="page-title">🔌 SIP Trunks</div>
+      <div class="page-sub">Manage inbound and outbound telephony trunks linked to LiveKit</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" onclick="syncLiveKit()" id="sync-btn">↻ Sync LiveKit</button>
+      <button class="btn btn-ghost btn-sm" onclick="showTrunkForm('inbound')">+ Add Inbound</button>
+      <button class="btn btn-primary btn-sm" onclick="showTrunkForm('outbound')">+ Add Outbound</button>
+    </div>
+    <div id="trunks-list"><div style="text-align:center;padding:32px;color:var(--muted);">Loading...</div></div>
+
+    <!-- Trunk Form Modal -->
+    <div id="trunk-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:none;align-items:center;justify-content:center;">
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;width:100%;max-width:480px;max-height:90vh;overflow-y:auto;">
+        <h3 id="trunk-modal-title" style="margin:0 0 20px;font-size:16px;font-weight:700;">Add Trunk</h3>
+        <div id="trunk-form-fields"></div>
+        <div style="display:flex;gap:8px;margin-top:20px;">
+          <button class="btn btn-ghost" style="flex:1;" onclick="closeTrunkModal()">Cancel</button>
+          <button class="btn btn-primary" style="flex:1;" onclick="submitTrunk()">Create Trunk</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Agent Presets ── -->
+  <div id="page-tel-presets" class="page">
+    <div class="page-header">
+      <div class="page-title">🤖 Agent Presets</div>
+      <div class="page-sub">Configure voice, language, and script for each call type</div>
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Quick-start from built-in template:</div>
+      <div id="preset-templates" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:20px;">
+      <button class="btn btn-primary btn-sm" onclick="showConfigForm(null)">+ New Custom Preset</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadAgentConfigs()">↻ Refresh</button>
+    </div>
+    <div id="configs-list"><div style="text-align:center;padding:32px;color:var(--muted);">Loading...</div></div>
+
+    <!-- Config Form Modal -->
+    <div id="config-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;align-items:center;justify-content:center;">
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;width:100%;max-width:600px;max-height:90vh;overflow-y:auto;">
+        <h3 id="config-modal-title" style="margin:0 0 20px;font-size:16px;font-weight:700;">New Agent Preset</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="form-group"><label>Name</label><input type="text" id="cfg-name" placeholder="My Insurance Config"></div>
+          <div class="form-group"><label>Type</label><select id="cfg-type"><option value="custom">Custom</option><option value="insurance">Insurance</option><option value="inquiry">Inquiry</option><option value="hr">HR</option><option value="appointment">Appointment</option><option value="survey">Survey</option></select></div>
+          <div class="form-group"><label>LLM Model</label><input type="text" id="cfg-llm" value="gpt-4o-mini"></div>
+          <div class="form-group"><label>TTS Provider</label><select id="cfg-tts-provider"><option value="sarvam">Sarvam</option><option value="elevenlabs">ElevenLabs</option></select></div>
+          <div class="form-group"><label>TTS Voice</label><input type="text" id="cfg-voice" value="rohan" placeholder="rohan / anushka / kavya"></div>
+          <div class="form-group"><label>TTS Language</label><input type="text" id="cfg-lang" value="hi-IN" placeholder="hi-IN / en-IN"></div>
+          <div class="form-group"><label>Max Duration (s)</label><input type="number" id="cfg-duration" value="300"></div>
+          <div class="form-group"><label>Max Turns</label><input type="number" id="cfg-turns" value="25"></div>
+          <div class="form-group"><label>Window Start</label><input type="time" id="cfg-win-start" value="09:30"></div>
+          <div class="form-group"><label>Window End</label><input type="time" id="cfg-win-end" value="19:30"></div>
+        </div>
+        <div class="form-group" style="margin-top:12px;"><label>First Line (greeting)</label><textarea id="cfg-first-line" rows="2" placeholder="Namaste! Main..."></textarea></div>
+        <div class="form-group" style="margin-top:12px;"><label>Agent Instructions</label><textarea id="cfg-instructions" rows="5" placeholder="You are a..."></textarea></div>
+        <div style="display:flex;gap:8px;margin-top:20px;">
+          <button class="btn btn-ghost" style="flex:1;" onclick="closeConfigModal()">Cancel</button>
+          <button class="btn btn-primary" style="flex:1;" onclick="submitConfig()">Save Preset</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Campaigns ── -->
+  <div id="page-tel-campaigns" class="page">
+    <div class="page-header">
+      <div class="page-title">📢 Campaigns</div>
+      <div class="page-sub">Create, manage, and monitor outbound call campaigns</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;">
+      <button class="btn btn-primary btn-sm" onclick="showCampaignForm()">+ New Campaign</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadCampaigns()">↻ Refresh</button>
+    </div>
+    <div id="campaigns-list"><div style="text-align:center;padding:32px;color:var(--muted);">Loading...</div></div>
+
+    <!-- Campaign Form Modal -->
+    <div id="campaign-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;align-items:center;justify-content:center;">
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;width:100%;max-width:560px;max-height:90vh;overflow-y:auto;">
+        <h3 style="margin:0 0 20px;font-size:16px;font-weight:700;">New Campaign</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="form-group" style="grid-column:1/-1;"><label>Campaign Name</label><input type="text" id="camp-name" placeholder="March Insurance Drive"></div>
+          <div class="form-group"><label>Agent Preset</label><select id="camp-config"></select></div>
+          <div class="form-group"><label>SIP Trunk</label><select id="camp-trunk"></select></div>
+          <div class="form-group"><label>Max Calls/Min</label><input type="number" id="camp-rate" value="5" min="1" max="60"></div>
+          <div class="form-group"><label>Max Retries</label><input type="number" id="camp-retries" value="2" min="0" max="5"></div>
+          <div class="form-group"><label>Daily Start</label><input type="time" id="camp-start" value="09:30"></div>
+          <div class="form-group"><label>Daily End</label><input type="time" id="camp-end" value="19:30"></div>
+        </div>
+        <div class="form-group" style="margin-top:12px;"><label>Notes</label><textarea id="camp-notes" rows="2" placeholder="Optional notes..."></textarea></div>
+        <div style="display:flex;gap:8px;margin-top:20px;">
+          <button class="btn btn-ghost" style="flex:1;" onclick="closeCampaignModal()">Cancel</button>
+          <button class="btn btn-primary" style="flex:1;" onclick="submitCampaign()">Create Campaign</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Leads Modal -->
+    <div id="leads-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9998;align-items:center;justify-content:center;">
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;width:100%;max-width:700px;max-height:90vh;overflow-y:auto;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+          <h3 id="leads-modal-title" style="margin:0;font-size:16px;font-weight:700;">Campaign Leads</h3>
+          <button onclick="closeLeadsModal()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;">×</button>
+        </div>
+        <!-- CSV upload -->
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:16px;">
+          <div style="font-size:12px;font-weight:600;margin-bottom:8px;">Upload CSV (columns: phone, name, email)</div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="file" id="leads-csv-file" accept=".csv" style="font-size:12px;">
+            <button class="btn btn-primary btn-sm" onclick="uploadLeadsCSV()">Upload</button>
+          </div>
+          <div id="csv-upload-result" style="font-size:12px;color:var(--muted);margin-top:6px;"></div>
+        </div>
+        <!-- Manual add -->
+        <div style="display:flex;gap:8px;margin-bottom:16px;">
+          <input type="text" id="lead-phone" placeholder="+919876543210" style="flex:1;">
+          <input type="text" id="lead-name" placeholder="Name (optional)" style="flex:1;">
+          <button class="btn btn-ghost btn-sm" onclick="addSingleLead()">+ Add</button>
+        </div>
+        <!-- Leads table -->
+        <div style="overflow-x:auto;max-height:300px;overflow-y:auto;">
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead><tr style="border-bottom:1px solid var(--border);">
+              <th style="padding:8px 10px;text-align:left;color:var(--muted);">Phone</th>
+              <th style="padding:8px 10px;text-align:left;color:var(--muted);">Name</th>
+              <th style="padding:8px 10px;text-align:left;color:var(--muted);">Status</th>
+              <th style="padding:8px 10px;text-align:left;color:var(--muted);">Attempts</th>
+              <th style="padding:8px 10px;text-align:left;color:var(--muted);">Actions</th>
+            </tr></thead>
+            <tbody id="leads-tbody"><tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">Loading...</td></tr></tbody>
+          </table>
+        </div>
+        <div style="margin-top:16px;text-align:right;">
+          <button class="btn btn-ghost btn-sm" onclick="loadLeads()">↻ Refresh Leads</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DNC List ── -->
+  <div id="page-tel-dnc" class="page">
+    <div class="page-header">
+      <div class="page-title">🚫 Do Not Call List</div>
+      <div class="page-sub">Numbers on this list will never be dialled by any campaign</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:20px;align-items:center;flex-wrap:wrap;">
+      <input type="text" id="dnc-phone-input" placeholder="+919876543210" style="width:220px;">
+      <select id="dnc-reason" style="padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px;">
+        <option value="manual">Manual</option>
+        <option value="user_request">User Request</option>
+        <option value="carrier_block">Carrier Block</option>
+        <option value="trai">TRAI</option>
+      </select>
+      <button class="btn btn-primary btn-sm" onclick="addDNC()">+ Add to DNC</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadDNC()">↻ Refresh</button>
+    </div>
+    <div class="section-card">
+      <div style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead><tr style="border-bottom:1px solid var(--border);">
+            <th style="padding:10px 12px;text-align:left;color:var(--muted);font-weight:500;">Phone</th>
+            <th style="padding:10px 12px;text-align:left;color:var(--muted);font-weight:500;">Reason</th>
+            <th style="padding:10px 12px;text-align:left;color:var(--muted);font-weight:500;">Source</th>
+            <th style="padding:10px 12px;text-align:left;color:var(--muted);font-weight:500;">Added</th>
+            <th style="padding:10px 12px;text-align:left;color:var(--muted);font-weight:500;">Action</th>
+          </tr></thead>
+          <tbody id="dnc-tbody"><tr><td colspan="5" style="text-align:center;padding:32px;color:var(--muted);">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <div id="page-credentials" class="page">
     <div class="page-header">
       <div class="page-title">API Credentials</div>
@@ -1438,8 +2011,423 @@ function badgeFor(summary) {{
   return '<span class="badge badge-gray">Completed</span>';
 }}
 
+// ── Telephony Overview ──────────────────────────────────────────────────────
+async function loadTelOverview() {{
+  try {{
+    const [overview, daily] = await Promise.all([
+      fetch('/api/telephony/analytics/overview').then(r => r.json()),
+      fetch('/api/telephony/analytics/daily?days=14').then(r => r.json()),
+    ]);
+    document.getElementById('tel-stat-campaigns').textContent = overview.total_campaigns ?? '—';
+    document.getElementById('tel-stat-active').textContent = overview.active_campaigns ?? '—';
+    document.getElementById('tel-stat-today').textContent = overview.calls_today ?? '—';
+    document.getElementById('tel-stat-dnc').textContent = overview.dnc_count ?? '—';
+
+    // Build mini bar chart
+    const bars = document.getElementById('tel-chart-bars');
+    const labels = document.getElementById('tel-chart-labels');
+    if (!bars || !daily) return;
+    const maxCalls = Math.max(...daily.map(d => d.total_calls), 1);
+    bars.innerHTML = daily.map(d => {{
+      const h = Math.max(Math.round((d.total_calls / maxCalls) * 110), 4);
+      return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;">
+        <div style="font-size:10px;color:var(--muted);">${{d.total_calls || ''}}</div>
+        <div title="${{d.date}}: ${{d.total_calls}} calls" style="width:100%;height:${{h}}px;background:linear-gradient(135deg,#3b82f6,#6366f1);border-radius:3px 3px 0 0;min-height:4px;"></div>
+      </div>`;
+    }}).join('');
+    labels.innerHTML = daily.map(d => {{
+      const dt = d.date.slice(5); // MM-DD
+      return `<div style="flex:1;text-align:center;font-size:9px;color:var(--muted);">${{dt}}</div>`;
+    }}).join('');
+  }} catch(e) {{
+    console.error('loadTelOverview error', e);
+  }}
+}}
+
+// ── SIP Trunks ───────────────────────────────────────────────────────────────
+let _trunkType = 'outbound';
+
+async function loadTrunks() {{
+  const el = document.getElementById('trunks-list');
+  if (!el) return;
+  el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--muted);">Loading...</div>';
+  try {{
+    const trunks = await fetch('/api/telephony/trunks').then(r => r.json());
+    if (!trunks.length) {{
+      el.innerHTML = '<div style="text-align:center;padding:48px;color:var(--muted);border:2px dashed var(--border);border-radius:12px;"><div style="font-size:28px;margin-bottom:12px;">🔌</div><div>No SIP trunks configured yet.</div><div style="font-size:12px;margin-top:6px;">Add an outbound trunk to start making calls.</div></div>';
+      return;
+    }}
+    const typeColors = {{ outbound: '#3b82f6', inbound: '#22c55e' }};
+    el.innerHTML = trunks.map(t => {{
+      const pool = Array.isArray(t.number_pool) ? t.number_pool : (typeof t.number_pool === 'string' ? JSON.parse(t.number_pool || '[]') : []);
+      return `<div style="border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:10px;background:var(--card);display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <div style="display:flex;gap:12px;align-items:center;flex:1;">
+          <div style="width:36px;height:36px;border-radius:10px;background:${{typeColors[t.trunk_type] || '#888'}}22;display:flex;align-items:center;justify-content:center;font-size:16px;">${{t.trunk_type==='outbound'?'↗':'↙'}}</div>
+          <div>
+            <div style="font-weight:600;font-size:14px;">${{t.name}} <span style="font-size:11px;padding:2px 7px;border-radius:20px;background:${{typeColors[t.trunk_type]||'#888'}}22;color:${{typeColors[t.trunk_type]||'#888'}}">${{t.trunk_type}}</span> <span style="font-size:11px;padding:2px 7px;border-radius:20px;background:var(--surface);color:var(--muted)">${{t.provider||''}}</span></div>
+            <div style="font-size:12px;color:var(--muted);margin-top:4px;">${{t.sip_address ? 'SIP: '+t.sip_address+'  ' : ''}}Numbers: ${{pool.join(', ')||'—'}}</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px;">LiveKit ID: ${{t.livekit_trunk_id||'not synced'}}${{t.max_concurrent_calls?' · Max concurrent: '+t.max_concurrent_calls:''}}</div>
+          </div>
+        </div>
+        <button onclick="deleteTrunk('${{t.id}}')" style="background:none;border:none;color:#ef4444;cursor:pointer;padding:6px;border-radius:8px;">🗑</button>
+      </div>`;
+    }}).join('');
+  }} catch(e) {{ el.innerHTML = '<div style="color:var(--muted);padding:24px;">Error loading trunks: '+e.message+'</div>'; }}
+}}
+
+function showTrunkForm(type) {{
+  _trunkType = type;
+  document.getElementById('trunk-modal-title').textContent = 'Add '+(type==='outbound'?'Outbound':'Inbound')+' SIP Trunk';
+  const outboundExtras = type === 'outbound' ? `
+    <div class="form-group"><label>SIP Address</label><input type="text" id="tf-sip" placeholder="sip.vobiz.ai"></div>
+    <div class="form-group"><label>Auth Username</label><input type="text" id="tf-user" placeholder=""></div>
+    <div class="form-group"><label>Auth Password</label><input type="password" id="tf-pass" placeholder=""></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div class="form-group"><label>Max Concurrent</label><input type="number" id="tf-conc" value="10"></div>
+      <div class="form-group"><label>Max/Number/Day</label><input type="number" id="tf-mpd" value="150"></div>
+    </div>` : `<div class="form-group"><label>Allowed Addresses (one per line)</label><textarea id="tf-allowed" rows="2" placeholder="sip.carrier.com"></textarea></div>`;
+  document.getElementById('trunk-form-fields').innerHTML = `
+    <div class="form-group"><label>Trunk Name</label><input type="text" id="tf-name" placeholder="Vobiz India Primary"></div>
+    <div class="form-group"><label>Provider</label><input type="text" id="tf-provider" placeholder="vobiz | twilio | telnyx" value="vobiz"></div>
+    ${{outboundExtras}}
+    <div class="form-group"><label>${{type==='outbound'?'Number Pool':'Your Numbers'}} <span style="font-size:11px;color:var(--muted)">(one per line, E.164)</span></label>
+      <textarea id="tf-pool" rows="3" placeholder="+919876543210\n+919876543211" style="font-family:monospace;"></textarea>
+    </div>`;
+  const m = document.getElementById('trunk-modal');
+  m.style.display = 'flex';
+}}
+function closeTrunkModal() {{ document.getElementById('trunk-modal').style.display='none'; }}
+
+async function submitTrunk() {{
+  const name = document.getElementById('tf-name').value.trim();
+  const provider = document.getElementById('tf-provider').value.trim();
+  if (!name) return alert('Name is required');
+  const pool = (document.getElementById('tf-pool').value||'').split('\n').map(n=>n.trim()).filter(Boolean);
+  let body, endpoint;
+  if (_trunkType === 'outbound') {{
+    body = {{ name, provider, sip_address: document.getElementById('tf-sip')?.value||'', auth_username: document.getElementById('tf-user')?.value||'', auth_password: document.getElementById('tf-pass')?.value||'', number_pool: pool, max_concurrent_calls: parseInt(document.getElementById('tf-conc')?.value||10), max_calls_per_number_per_day: parseInt(document.getElementById('tf-mpd')?.value||150) }};
+    endpoint = '/api/telephony/trunks/outbound';
+  }} else {{
+    const allowed = (document.getElementById('tf-allowed')?.value||'').split('\n').map(n=>n.trim()).filter(Boolean);
+    body = {{ name, provider, numbers: pool, allowed_addresses: allowed }};
+    endpoint = '/api/telephony/trunks/inbound';
+  }}
+  try {{
+    const r = await fetch(endpoint, {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+    if (!r.ok) {{ const e = await r.text(); throw new Error(e); }}
+    closeTrunkModal(); loadTrunks();
+  }} catch(e) {{ alert('Error: '+e.message); }}
+}}
+
+async function deleteTrunk(id) {{
+  if (!confirm('Delete this trunk from LiveKit and database?')) return;
+  await fetch('/api/telephony/trunks/'+id, {{method:'DELETE'}});
+  loadTrunks();
+}}
+
+async function syncLiveKit() {{
+  const btn = document.getElementById('sync-btn');
+  if (btn) btn.textContent = '⟳ Syncing...';
+  try {{
+    const r = await fetch('/api/telephony/trunks/livekit/sync').then(x=>x.json());
+    alert(`LiveKit Trunks\\nOutbound: ${{r.outbound?.length||0}}\\nInbound: ${{r.inbound?.length||0}}`);
+  }} catch(e) {{ alert('Sync error: '+e.message); }}
+  finally {{ if (btn) btn.textContent = '↻ Sync LiveKit'; }}
+}}
+
+// ── Agent Configs ─────────────────────────────────────────────────────────────
+let _editConfigId = null;
+
+async function loadAgentConfigs() {{
+  const el = document.getElementById('configs-list');
+  if (!el) return;
+  el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--muted);">Loading...</div>';
+  try {{
+    const [configs, presets] = await Promise.all([
+      fetch('/api/telephony/agent-configs').then(r=>r.json()),
+      fetch('/api/telephony/presets').then(r=>r.json()),
+    ]);
+    // Render preset templates row
+    const tmplEl = document.getElementById('preset-templates');
+    if (tmplEl) {{
+      const icons = {{insurance:'🛡️',inquiry:'🔍',hr:'👔',appointment:'📅',survey:'📊',custom:'⚙️'}};
+      tmplEl.innerHTML = Object.keys(presets).map(type => `<button onclick="createFromPreset('${{type}}')" style="display:flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;font-size:12px;">${{icons[type]||'⚙️'}} ${{type.charAt(0).toUpperCase()+type.slice(1)}}</button>`).join('');
+    }}
+    if (!configs.length) {{
+      el.innerHTML = '<div style="text-align:center;padding:48px;color:var(--muted);border:2px dashed var(--border);border-radius:12px;"><div style="font-size:28px;margin-bottom:12px;">🤖</div><div>No agent presets yet. Create one above.</div></div>';
+      return;
+    }}
+    const colors = {{insurance:'#a855f7',inquiry:'#3b82f6',hr:'#22c55e',appointment:'#eab308',survey:'#ec4899',custom:'#64748b'}};
+    el.innerHTML = configs.map(c => `<div style="border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:10px;background:var(--card);display:flex;justify-content:space-between;align-items:start;">
+      <div>
+        <div style="font-weight:600;font-size:14px;">${{c.name}} <span style="font-size:11px;padding:2px 7px;border-radius:20px;background:${{colors[c.preset_type]||'#888'}}22;color:${{colors[c.preset_type]||'#888'}}">${{c.preset_type||'custom'}}</span></div>
+        <div style="font-size:12px;color:var(--muted);margin-top:4px;">TTS: ${{c.tts_voice||'—'}} (${{c.tts_language||'—'}}) · LLM: ${{c.llm_model||'—'}} · Max: ${{c.max_call_duration_seconds||300}}s / ${{c.max_turns||25}} turns</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px;max-width:500px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${{c.first_line||'No first line set'}}</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:4px;">
+        <button onclick="showConfigForm(${{JSON.stringify(JSON.stringify(c))}})" style="background:none;border:none;cursor:pointer;color:var(--muted);">✏️</button>
+        <button onclick="deleteConfig('${{c.id}}')" style="background:none;border:none;color:#ef4444;cursor:pointer;">🗑</button>
+      </div>
+    </div>`).join('');
+  }} catch(e) {{ el.innerHTML = '<div style="color:var(--muted);padding:24px;">Error: '+e.message+'</div>'; }}
+}}
+
+async function createFromPreset(type) {{
+  try {{
+    await fetch('/api/telephony/agent-configs/from-preset/'+type, {{method:'POST',headers:{{'Content-Type':'application/json'}},body:'{{}}'}});
+    loadAgentConfigs();
+  }} catch(e) {{ alert('Error: '+e.message); }}
+}}
+
+function showConfigForm(cfgJsonStr) {{
+  _editConfigId = null;
+  let c = {{}};
+  if (cfgJsonStr) {{
+    try {{ c = JSON.parse(cfgJsonStr); _editConfigId = c.id; }} catch(e) {{}}
+  }}
+  document.getElementById('config-modal-title').textContent = _editConfigId ? 'Edit Agent Preset' : 'New Agent Preset';
+  document.getElementById('cfg-name').value = c.name || '';
+  document.getElementById('cfg-type').value = c.preset_type || 'custom';
+  document.getElementById('cfg-llm').value = c.llm_model || 'gpt-4o-mini';
+  document.getElementById('cfg-tts-provider').value = c.tts_provider || 'sarvam';
+  document.getElementById('cfg-voice').value = c.tts_voice || 'rohan';
+  document.getElementById('cfg-lang').value = c.tts_language || 'hi-IN';
+  document.getElementById('cfg-duration').value = c.max_call_duration_seconds || 300;
+  document.getElementById('cfg-turns').value = c.max_turns || 25;
+  document.getElementById('cfg-win-start').value = c.call_window_start || '09:30';
+  document.getElementById('cfg-win-end').value = c.call_window_end || '19:30';
+  document.getElementById('cfg-first-line').value = c.first_line || '';
+  document.getElementById('cfg-instructions').value = c.agent_instructions || '';
+  document.getElementById('config-modal').style.display = 'flex';
+}}
+function closeConfigModal() {{ document.getElementById('config-modal').style.display='none'; }}
+
+async function submitConfig() {{
+  const name = document.getElementById('cfg-name').value.trim();
+  if (!name) return alert('Name is required');
+  const payload = {{
+    name, preset_type: document.getElementById('cfg-type').value,
+    llm_model: document.getElementById('cfg-llm').value,
+    tts_provider: document.getElementById('cfg-tts-provider').value,
+    tts_voice: document.getElementById('cfg-voice').value,
+    tts_language: document.getElementById('cfg-lang').value,
+    max_call_duration_seconds: parseInt(document.getElementById('cfg-duration').value)||300,
+    max_turns: parseInt(document.getElementById('cfg-turns').value)||25,
+    call_window_start: document.getElementById('cfg-win-start').value,
+    call_window_end: document.getElementById('cfg-win-end').value,
+    first_line: document.getElementById('cfg-first-line').value,
+    agent_instructions: document.getElementById('cfg-instructions').value,
+  }};
+  const url = _editConfigId ? '/api/telephony/agent-configs/'+_editConfigId : '/api/telephony/agent-configs';
+  const method = _editConfigId ? 'PUT' : 'POST';
+  try {{
+    const r = await fetch(url, {{method, headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(payload)}});
+    if (!r.ok) throw new Error(await r.text());
+    closeConfigModal(); loadAgentConfigs();
+  }} catch(e) {{ alert('Error: '+e.message); }}
+}}
+
+async function deleteConfig(id) {{
+  if (!confirm('Archive this preset?')) return;
+  await fetch('/api/telephony/agent-configs/'+id, {{method:'DELETE'}});
+  loadAgentConfigs();
+}}
+
+// ── Campaigns ─────────────────────────────────────────────────────────────────
+let _activeCampaignId = null;
+
+async function loadCampaigns() {{
+  const el = document.getElementById('campaigns-list');
+  if (!el) return;
+  el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--muted);">Loading...</div>';
+  try {{
+    const campaigns = await fetch('/api/telephony/campaigns').then(r=>r.json());
+    if (!campaigns.length) {{
+      el.innerHTML = '<div style="text-align:center;padding:48px;color:var(--muted);border:2px dashed var(--border);border-radius:12px;"><div style="font-size:28px;margin-bottom:12px;">📢</div><div>No campaigns yet. Create one to get started.</div></div>';
+      return;
+    }}
+    const statusColors = {{ active:'#22c55e', draft:'#64748b', paused:'#eab308', completed:'#3b82f6', cancelled:'#ef4444' }};
+    el.innerHTML = campaigns.map(c => {{
+      const pct = c.total_leads ? Math.round((c.called_count/c.total_leads)*100) : 0;
+      return `<div style="border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:12px;background:var(--card);">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <div>
+            <div style="font-weight:600;font-size:15px;">${{c.name}} <span style="font-size:11px;padding:2px 8px;border-radius:20px;background:${{statusColors[c.status]||'#888'}}22;color:${{statusColors[c.status]||'#888'}}">${{c.status}}</span></div>
+            <div style="font-size:12px;color:var(--muted);margin-top:3px;">Preset: ${{c.config_name||'—'}} · Trunk: ${{c.trunk_name||'—'}} · ${{c.max_calls_per_minute}} calls/min</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            ${{c.status==='draft'||c.status==='paused'?`<button onclick="campaignAction('${{c.id}}','start')" class="btn btn-primary btn-sm">▶ Start</button>`:''}}\
+            ${{c.status==='active'?`<button onclick="campaignAction('${{c.id}}','pause')" class="btn btn-ghost btn-sm">⏸ Pause</button>`:''}}\
+            ${{c.status==='paused'?`<button onclick="campaignAction('${{c.id}}','resume')" class="btn btn-ghost btn-sm">↩ Resume</button>`:''}}\
+            ${{c.status!=='cancelled'&&c.status!=='completed'?`<button onclick="campaignAction('${{c.id}}','cancel')" class="btn btn-ghost btn-sm" style="color:#ef4444;">✕ Cancel</button>`:''}}
+            <button onclick="openLeads('${{c.id}}','${{(c.name||'').replace(/'/g,'')}}');" class="btn btn-ghost btn-sm">👥 Leads</button>
+            <button onclick="deleteCampaign('${{c.id}}')" style="background:none;border:none;color:#ef4444;cursor:pointer;">🗑</button>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;">
+          <div style="background:var(--surface);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:11px;color:var(--muted);">Total</div><div style="font-weight:600;">${{c.total_leads||0}}</div></div>
+          <div style="background:var(--surface);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:11px;color:var(--muted);">Called</div><div style="font-weight:600;">${{c.called_count||0}}</div></div>
+          <div style="background:var(--surface);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:11px;color:var(--muted);">Answered</div><div style="font-weight:600;">${{c.answered_count||0}}</div></div>
+          <div style="background:var(--surface);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:11px;color:var(--muted);">Booked</div><div style="font-weight:600;">${{c.booked_count||0}}</div></div>
+        </div>
+        <div style="background:var(--surface);border-radius:6px;height:6px;overflow:hidden;"><div style="height:100%;width:${{pct}}%;background:linear-gradient(90deg,#3b82f6,#6366f1);border-radius:6px;transition:width 0.3s;"></div></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px;">${{pct}}% complete</div>
+      </div>`;
+    }}).join('');
+  }} catch(e) {{ el.innerHTML = '<div style="color:var(--muted);padding:24px;">Error: '+e.message+'</div>'; }}
+}}
+
+async function showCampaignForm() {{
+  // Populate selects
+  const [configs, trunks] = await Promise.all([
+    fetch('/api/telephony/agent-configs').then(r=>r.json()),
+    fetch('/api/telephony/trunks').then(r=>r.json()),
+  ]);
+  document.getElementById('camp-config').innerHTML = configs.map(c=>`<option value="${{c.id}}">${{c.name}}</option>`).join('') || '<option value="">— No presets found —</option>';
+  document.getElementById('camp-trunk').innerHTML = trunks.filter(t=>t.trunk_type==='outbound').map(t=>`<option value="${{t.id}}">${{t.name}}</option>`).join('') || '<option value="">— No trunks found —</option>';
+  document.getElementById('camp-name').value = '';
+  document.getElementById('campaign-modal').style.display = 'flex';
+}}
+function closeCampaignModal() {{ document.getElementById('campaign-modal').style.display='none'; }}
+
+async function submitCampaign() {{
+  const name = document.getElementById('camp-name').value.trim();
+  if (!name) return alert('Campaign name is required');
+  const payload = {{
+    name,
+    agent_config_id: document.getElementById('camp-config').value,
+    sip_trunk_id: document.getElementById('camp-trunk').value,
+    max_calls_per_minute: parseInt(document.getElementById('camp-rate').value)||5,
+    max_retries_per_lead: parseInt(document.getElementById('camp-retries').value)||2,
+    daily_start_time: document.getElementById('camp-start').value,
+    daily_end_time: document.getElementById('camp-end').value,
+    notes: document.getElementById('camp-notes').value,
+  }};
+  try {{
+    const r = await fetch('/api/telephony/campaigns', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});
+    if (!r.ok) throw new Error(await r.text());
+    closeCampaignModal(); loadCampaigns();
+  }} catch(e) {{ alert('Error: '+e.message); }}
+}}
+
+async function campaignAction(id, action) {{
+  await fetch('/api/telephony/campaigns/'+id+'/'+action, {{method:'POST'}});
+  loadCampaigns();
+}}
+
+async function deleteCampaign(id) {{
+  if (!confirm('Delete this campaign and all its leads?')) return;
+  await fetch('/api/telephony/campaigns/'+id, {{method:'DELETE'}});
+  loadCampaigns();
+}}
+
+// ── Leads ─────────────────────────────────────────────────────────────────────
+function openLeads(campaignId, name) {{
+  _activeCampaignId = campaignId;
+  document.getElementById('leads-modal-title').textContent = 'Leads — '+name;
+  document.getElementById('leads-modal').style.display = 'flex';
+  document.getElementById('csv-upload-result').textContent = '';
+  loadLeads();
+}}
+function closeLeadsModal() {{ document.getElementById('leads-modal').style.display='none'; _activeCampaignId=null; }}
+
+async function loadLeads() {{
+  if (!_activeCampaignId) return;
+  const tbody = document.getElementById('leads-tbody');
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">Loading...</td></tr>';
+  try {{
+    const leads = await fetch('/api/telephony/campaigns/'+_activeCampaignId+'/leads?limit=200').then(r=>r.json());
+    if (!leads.length) {{
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">No leads yet. Upload a CSV or add manually.</td></tr>';
+      return;
+    }}
+    const sc = {{pending:'#64748b',calling:'#3b82f6',answered:'#22c55e',no_answer:'#eab308',failed:'#ef4444',dnc:'#dc2626',completed:'#22c55e',retry:'#f97316'}};
+    tbody.innerHTML = leads.map(l => `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:8px 10px;">${{l.phone}}</td>
+      <td style="padding:8px 10px;">${{l.name||'—'}}</td>
+      <td style="padding:8px 10px;"><span style="font-size:11px;padding:2px 7px;border-radius:10px;background:${{sc[l.status]||'#888'}}22;color:${{sc[l.status]||'#888'}}">${{l.status}}</span></td>
+      <td style="padding:8px 10px;">${{l.attempts||0}}</td>
+      <td style="padding:8px 10px;"><button onclick="leadToDNC('${{l.id}}')" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:11px;">DNC</button></td>
+    </tr>`).join('');
+  }} catch(e) {{ tbody.innerHTML = '<tr><td colspan="5" style="padding:16px;color:var(--muted);">Error: '+e.message+'</td></tr>'; }}
+}}
+
+async function addSingleLead() {{
+  const phone = document.getElementById('lead-phone').value.trim();
+  if (!phone || !_activeCampaignId) return;
+  const name = document.getElementById('lead-name').value.trim();
+  await fetch('/api/telephony/campaigns/'+_activeCampaignId+'/leads', {{
+    method:'POST', headers:{{'Content-Type':'application/json'}},
+    body: JSON.stringify({{leads:[{{phone,name}}]}})
+  }});
+  document.getElementById('lead-phone').value='';
+  document.getElementById('lead-name').value='';
+  loadLeads();
+}}
+
+async function uploadLeadsCSV() {{
+  const fileInput = document.getElementById('leads-csv-file');
+  const resultEl = document.getElementById('csv-upload-result');
+  if (!fileInput.files.length) return alert('Please select a CSV file');
+  resultEl.textContent = 'Uploading...';
+  try {{
+    const body = await fileInput.files[0].arrayBuffer();
+    const r = await fetch('/api/telephony/campaigns/'+_activeCampaignId+'/leads/csv', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'text/csv'}},
+      body,
+    }});
+    const data = await r.json();
+    resultEl.textContent = '✅ Added '+data.added+' leads';
+    loadLeads();
+  }} catch(e) {{ resultEl.textContent = '❌ Error: '+e.message; }}
+}}
+
+async function leadToDNC(leadId) {{
+  if (!confirm('Move this lead to DNC?')) return;
+  await fetch('/api/telephony/campaigns/'+_activeCampaignId+'/leads/'+leadId+'/dnc', {{method:'POST'}});
+  loadLeads();
+}}
+
+// ── DNC List ──────────────────────────────────────────────────────────────────
+async function loadDNC() {{
+  const tbody = document.getElementById('dnc-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:32px;color:var(--muted);">Loading...</td></tr>';
+  try {{
+    const list = await fetch('/api/telephony/dnc').then(r=>r.json());
+    if (!list.length) {{
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:32px;color:var(--muted);">DNC list is empty.</td></tr>';
+      return;
+    }}
+    tbody.innerHTML = list.map(d => `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:10px 12px;font-family:monospace;">${{d.phone}}</td>
+      <td style="padding:10px 12px;">${{d.reason||'—'}}</td>
+      <td style="padding:10px 12px;">${{d.source||'—'}}</td>
+      <td style="padding:10px 12px;color:var(--muted);font-size:12px;">${{(d.created_at||'').slice(0,10)}}</td>
+      <td style="padding:10px 12px;"><button onclick="removeDNC('${{d.phone}}')" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:12px;">Remove</button></td>
+    </tr>`).join('');
+  }} catch(e) {{ tbody.innerHTML = '<tr><td colspan="5" style="padding:16px;color:var(--muted);">Error: '+e.message+'</td></tr>'; }}
+}}
+
+async function addDNC() {{
+  const phone = document.getElementById('dnc-phone-input').value.trim();
+  const reason = document.getElementById('dnc-reason').value;
+  if (!phone) return alert('Enter a phone number');
+  await fetch('/api/telephony/dnc', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{phone,reason}})}});
+  document.getElementById('dnc-phone-input').value='';
+  loadDNC();
+}}
+
+async function removeDNC(phone) {{
+  if (!confirm('Remove '+phone+' from DNC list?')) return;
+  await fetch('/api/telephony/dnc/'+encodeURIComponent(phone), {{method:'DELETE'}});
+  loadDNC();
+}}
+
 // ── Call Logs ───────────────────────────────────────────────────────────────
 async function loadLogs() {{
+
   const tbody = document.getElementById('logs-table-body');
   tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--muted);">Loading...</td></tr>';
   try {{
