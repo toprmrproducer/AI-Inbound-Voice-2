@@ -549,16 +549,26 @@ async def run_demo_session(ctx: JobContext):
         prefix_padding_duration=0.1,
     )
 
-    session = AgentSession(
-        stt=sarvam.STT(model="saaras:v3", language="unknown", mode="transcribe"),
-        llm=openai.LLM(model=llm_model),
-        tts=sarvam.TTS(
+    tts_provider = live_config.get("tts_provider", "sarvam")
+
+    if tts_provider == "elevenlabs" and elevenlabs_plugin:
+        demo_tts = elevenlabs_plugin.TTS(
+            model="eleven_turbo_v2_5",
+            voice_id=live_config.get("elevenlabs_voice_id", "21m00Tcm4TlvDq8ikWAM"),
+        )
+    else:
+        demo_tts = sarvam.TTS(
             model="bulbul:v3",
             speaker=get_lang_config("hi-IN")["speaker"],
             target_language_code="hi-IN",
             enable_preprocessing=True,
             pace=0.95,
-        ),
+        )
+
+    session = AgentSession(
+        stt=sarvam.STT(model="saaras:v3", language="unknown", mode="transcribe"),
+        llm=openai.LLM(model=llm_model),
+        tts=demo_tts,
         vad=vad,
         turn_detection="stt",
         min_interruption_duration=0.0,
@@ -585,7 +595,19 @@ async def run_demo_session(ctx: JobContext):
 
     # Greet in "auto" neutral language before detection
     greeting = live_config.get("first_line") or get_multilingual_greeting("auto")
-    await session.say(greeting, allow_interruptions=True)
+    
+    import asyncio
+    try:
+        # Avoid hanging forever if Sarvam TTS is flaky
+        await asyncio.wait_for(
+            session.say(greeting, allow_interruptions=True),
+            timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[DEMO] greeting timed out, continuing anyway")
+    except Exception as e:
+        logger.warning(f"[DEMO] greeting failed: {e}")
+
     logger.info("[DEMO] Session live.")
     
     # Wait for the browser participant to leave
