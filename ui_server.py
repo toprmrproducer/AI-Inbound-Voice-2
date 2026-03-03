@@ -164,10 +164,33 @@ async def api_get_bookings():
 async def api_get_stats():
     import db
     try:
-        return db.fetch_stats()
+        stats = db.fetch_stats()
+        stats["db_error"] = None
+        return stats
     except Exception as e:
         logger.error(f"Error fetching stats: {e}")
-        return {"total_calls": 0, "total_bookings": 0, "avg_duration": 0, "booking_rate": 0}
+        return {
+            "total_calls": None, "total_bookings": None,
+            "avg_duration": None, "booking_rate": None,
+            "db_error": str(e),
+        }
+
+@app.get("/api/db-status")
+async def api_db_status():
+    """Quick health-check for the PostgreSQL connection."""
+    import db
+    try:
+        url = db._get_db_url()
+        # Try a trivial query
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        # Redact password from URL before returning
+        import re
+        safe_url = re.sub(r"(:)[^@]+(@)", r"\1***\2", url)
+        return {"connected": True, "url": safe_url}
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
 
 @app.get("/api/contacts")
 async def api_get_contacts():
@@ -1986,9 +2009,12 @@ function goTo(pageId, el) {{
 
 // ── Stats & Dashboard ───────────────────────────────────────────────────────
 async function loadDashboard() {{
-  // Optimistically clear Loading...
   const tbody = document.getElementById('dash-table-body');
-  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">Loading...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--muted);">Loading...</td></tr>';
+
+  // Remove any existing DB error banner
+  const existingBanner = document.getElementById('db-error-banner');
+  if (existingBanner) existingBanner.remove();
 
   let stats = null, logs = null;
 
@@ -2010,27 +2036,38 @@ async function loadDashboard() {{
     console.error('Logs fetch failed:', e);
   }}
 
-  // ── Update stat cards ──────────────────────────────────────────────────
-  if (stats !== null) {{
-    const fmt = (v, suffix='') => (v !== null && v !== undefined) ? v + suffix : '0' + suffix;
-    document.getElementById('stat-calls').textContent    = fmt(stats.total_calls);
-    document.getElementById('stat-bookings').textContent = fmt(stats.total_bookings);
-    document.getElementById('stat-duration').textContent = fmt(stats.avg_duration, 's');
-    document.getElementById('stat-rate').textContent     = fmt(stats.booking_rate, '%');
-  }} else {{
-    ['stat-calls','stat-bookings','stat-duration','stat-rate'].forEach(id => {{
-      document.getElementById(id).textContent = '!';
-      document.getElementById(id).title = 'Could not load — check Supabase credentials';
-    }});
+  // ── DB error banner ─────────────────────────────────────────────────────
+  const dbErr = stats?.db_error;
+  if (dbErr) {{
+    const banner = document.createElement('div');
+    banner.id = 'db-error-banner';
+    banner.style.cssText = 'background:#ef444420;border:1px solid #ef4444;border-radius:12px;padding:14px 18px;margin-bottom:20px;font-size:13px;line-height:1.6;';
+    banner.innerHTML = `
+      <div style="font-weight:700;color:#ef4444;margin-bottom:6px;">⚠ Database Not Connected</div>
+      <div style="color:var(--text);margin-bottom:8px;">${{dbErr}}</div>
+      <div style="color:var(--muted);">Set <code style="background:var(--surface);padding:2px 5px;border-radius:4px;">DATABASE_URL</code> in your Coolify environment variables.
+      The value should be your Supabase <b>Direct Connection</b> string:<br>
+      <code style="background:var(--surface);padding:3px 8px;border-radius:4px;font-size:11px;">postgresql://postgres:[YOUR-DB-PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres</code><br>
+      <span style="font-size:11px;">Find this in Supabase → Settings → Database → Connection String → URI</span></div>
+      <div style="margin-top:10px;"><a href="/api/db-status" target="_blank" style="color:#60a5fa;font-size:12px;">Check DB status →</a></div>`;
+    const pageHeader = document.querySelector('#page-dashboard .stat-grid');
+    if (pageHeader) pageHeader.parentNode.insertBefore(banner, pageHeader);
   }}
+
+  // ── Update stat cards ──────────────────────────────────────────────────
+  const fmt = (v, suffix='') => (v !== null && v !== undefined) ? v + suffix : '—';
+  document.getElementById('stat-calls').textContent    = fmt(stats?.total_calls);
+  document.getElementById('stat-bookings').textContent = fmt(stats?.total_bookings);
+  document.getElementById('stat-duration').textContent = fmt(stats?.avg_duration, 's');
+  document.getElementById('stat-rate').textContent     = fmt(stats?.booking_rate, '%');
 
   // ── Update calls table ─────────────────────────────────────────────────
   if (logs === null) {{
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:#e06c75;">⚠ Could not load calls — check Supabase URL and KEY in API Credentials.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:#ef4444;">⚠ Could not load calls — check DATABASE_URL environment variable.</td></tr>';
     return;
   }}
   if (!logs.length) {{
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">No calls yet. Make a test call!</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--muted);">No calls yet. Make a test call!</td></tr>';
     return;
   }}
   tbody.innerHTML = logs.slice(0, 20).map(log => `

@@ -7,8 +7,35 @@ from datetime import datetime
 logger = logging.getLogger("db")
 
 
+def _get_db_url() -> str:
+    """
+    Resolve the PostgreSQL connection string from environment variables.
+    Tried in order:
+      1. DATABASE_URL
+      2. POSTGRES_URL
+      3. POSTGRES_CONN
+      4. Supabase pooler URL built from SUPABASE_DB_URL (if set explicitly)
+    Raises RuntimeError with a clear diagnostic message if nothing is available.
+    """
+    for key in ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_CONN", "SUPABASE_DB_URL"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            # Normalise postgres:// → postgresql:// (psycopg2 prefers the latter)
+            if val.startswith("postgres://"):
+                val = "postgresql://" + val[len("postgres://"):]
+            return val
+    raise RuntimeError(
+        "No database connection URL found. "
+        "Set DATABASE_URL (or POSTGRES_URL) in your environment / Coolify variables. "
+        "Example: DATABASE_URL=postgresql://postgres:[password]@db.[ref].supabase.co:5432/postgres"
+    )
+
+
 def get_conn():
-    return psycopg2.connect(os.environ["DATABASE_URL"])
+    """Return a new psycopg2 connection. Raises RuntimeError if no DB URL is configured."""
+    url = _get_db_url()
+    return psycopg2.connect(url)
+
 
 
 def init_db():
