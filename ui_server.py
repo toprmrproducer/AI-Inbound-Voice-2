@@ -714,7 +714,8 @@ async def api_demo_token(slug: str):
     room_name = f"demo-{slug}-{secrets.token_hex(4)}"
     lk_api_key    = os.getenv("LIVEKIT_API_KEY", "")
     lk_api_secret = os.getenv("LIVEKIT_API_SECRET", "")
-    lk_url        = os.getenv("LIVEKIT_URL", "")
+    # Strip trailing slash to ensure clean wss:// URL for the frontend
+    lk_url        = os.getenv("LIVEKIT_URL", "").rstrip("/")
 
     try:
         from livekit import api as lk_api
@@ -733,10 +734,11 @@ async def api_demo_token(slug: str):
                 )
             )
 
-        # Step 2 — Generate visitor token
+        # Step 2 — Generate visitor token (1-hour TTL)
+        visitor_identity = f"visitor-{secrets.token_hex(4)}"
         token = (
             lk_api.AccessToken(lk_api_key, lk_api_secret)
-            .with_identity(f"visitor-{secrets.token_hex(4)}")
+            .with_identity(visitor_identity)
             .with_name("Demo Visitor")
             .with_grants(lk_api.VideoGrants(
                 room_join=True,
@@ -745,13 +747,14 @@ async def api_demo_token(slug: str):
                 can_subscribe=True,
                 can_publish_data=True,
             ))
+            .with_ttl(3600)
             .to_jwt()
         )
     except Exception as e:
         logger.error(f"[DEMO] Token/Dispatch error: {e}")
         raise HTTPException(500, f"Token generation failed: {e}")
 
-    return {"token": token, "room": room_name, "ws_url": lk_url}
+    return {"token": token, "room": room_name, "ws_url": lk_url, "identity": visitor_identity}
 
 @app.delete("/api/demo/{slug}")
 async def api_demo_delete(slug: str):
@@ -907,11 +910,24 @@ async def demo_page(slug: str):
             try {{
                 const res = await fetch('/api/demo/token/' + SLUG);
                 if (!res.ok) throw new Error('Demo link expired or invalid.');
-                const {{ token, room: roomName, ws_url }} = await res.json();
+                const {{ token, room: roomName, ws_url, identity }} = await res.json();
 
                 room = new LivekitClient.Room({{
                     adaptiveStream: true,
                     dynacast: true,
+                }});
+
+                // ── Lifecycle events ──────────────────────────────────────
+                room.on(LivekitClient.RoomEvent.Connected, () => {{
+                    setStatus('Waiting for agent to join\u2026', 'connecting');
+                }});
+
+                room.on(LivekitClient.RoomEvent.Reconnecting, () => {{
+                    setStatus('Reconnecting\u2026', 'connecting');
+                }});
+
+                room.on(LivekitClient.RoomEvent.Reconnected, () => {{
+                    setStatus('Reconnected \u2014 speak now', 'live');
                 }});
 
                 room.on(LivekitClient.RoomEvent.Disconnected, () => {{
@@ -921,23 +937,47 @@ async def demo_page(slug: str):
                     stopBtn.style.display = 'none';
                 }});
 
+                // ── Agent joins ───────────────────────────────────────────
                 room.on(LivekitClient.RoomEvent.ParticipantConnected, (p) => {{
-                    if (p.identity && p.identity.startsWith('agent')) {{
+                    if (p.identity && (p.identity.startsWith('agent') || p.identity.startsWith('outbound'))) {{
                         setStatus('Agent is live \u2014 speak now', 'live');
                     }}
                 }});
 
-                room.on(LivekitClient.RoomEvent.ConnectionStateChanged, (state) => {{
-                    if (state === 'connected') setStatus('Waiting for agent to join\u2026', 'connecting');
+                // ── Agent audio: auto-attach when track arrives ───────────
+                room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, _pub, participant) => {{
+                    if (track.kind === 'audio') {{
+                        console.log('[DEMO] Agent audio track from', participant.identity);
+                        const audioEl = track.attach();
+                        audioEl.autoplay = true;
+                        document.body.appendChild(audioEl);
+                    }}
                 }});
 
-                await room.connect(ws_url, token);
-                await room.localParticipant.setMicrophoneEnabled(true);
+                // ── Speaking indicator ────────────────────────────────────
+                room.on(LivekitClient.RoomEvent.ActiveSpeakersChanged, (speakers) => {{
+                    const agentSpeaking = speakers.some(s =>
+                        s.identity && (s.identity.startsWith('agent') || s.identity.startsWith('outbound'))
+                    );
+                    if (agentSpeaking) setStatus('Agent speaking\u2026', 'live');
+                }});
+
+                // ── Connect with autoSubscribe ────────────────────────────
+                await room.connect(ws_url, token, {{ autoSubscribe: true }});
                 startBtn.style.display = 'none';
-                stopBtn.style.display = 'flex';
+                stopBtn.style.display  = 'flex';
+
+                // ── Publish mic (graceful degradation if denied) ──────────
+                try {{
+                    await room.localParticipant.setMicrophoneEnabled(true);
+                    console.log('[DEMO] Mic published');
+                }} catch (micErr) {{
+                    console.warn('[DEMO] Mic unavailable:', micErr.message);
+                    setStatus('No mic access \u2014 you can listen but not speak', 'connecting');
+                }}
 
             }} catch (err) {{
-                setStatus('\u26a0 ' + err.message, 'error');
+                setStatus('\u26a0\ufe0f ' + err.message, 'error');
                 startBtn.disabled = false;
             }}
         }}
@@ -952,6 +992,7 @@ async def demo_page(slug: str):
     </script>
 </body>
 </html>""")
+
 
 # ── Agent Management Endpoints ─────────────────────────────────────────────────
 

@@ -488,29 +488,33 @@ class AutoLanguageAgent(Agent):
         if not self.language_locked:
             detected = getattr(new_message, "language", None)
             if not detected:
-                # Try nested transcript attribute
                 try:
                     detected = new_message.content[0].language  # type: ignore[attr-defined]
                 except Exception:
                     detected = None
+
             if detected and detected not in ("unknown", "", None) and detected in LANGUAGE_CONFIG:
                 self.detected_language = detected
                 self.language_locked = True
-                logger.info(f"[LANG] Detected: {detected} ({get_lang_config(detected)['name']}) — locking in")
-                # Update system prompt to enforce the detected language
+                logger.info(f"[LANG] Detected {detected} ({get_lang_config(detected)['name']}), locking in")
                 self.instructions = build_multilang_system_prompt(detected, self._base_instructions)
-                # Swap TTS on the session if available
-                if self._session_ref is not None:
+
+                if self.session_ref is not None:
                     cfg = get_lang_config(detected)
                     try:
-                        self._session_ref._tts = sarvam.TTS(
+                        new_tts = sarvam.TTS(
                             model="bulbul:v3",
                             speaker=cfg["speaker"],
                             target_language_code=cfg["tts_lang"],
+                            enable_preprocessing=True,
+                            pace=0.95,
                         )
-                        logger.info(f"[LANG] TTS swapped to {cfg['name']} (speaker={cfg['speaker']})")
+                        self.session_ref.tts = new_tts
+                        logger.info(f"[LANG] TTS swapped to {cfg['name']} speaker={cfg['speaker']}")
                     except Exception as e:
                         logger.warning(f"[LANG] TTS swap failed: {e}")
+                        # don't crash — keep old TTS
+
         await super().on_user_turn_completed(turn_ctx, new_message)
 
 
@@ -520,27 +524,46 @@ class AutoLanguageAgent(Agent):
 
 async def run_demo_session(ctx: JobContext):
     """
-    Handles a browser-based demo call via LiveKit WebRTC.
-    Visitor has already joined the room from /demo/<slug>.
-    Uses the same voice pipeline as regular inbound calls.
+    Handles a browser-based WebRTC demo call.
+    Hardened against Sarvam TTS WebSocket drops.
     """
     logger.info(f"[DEMO] Browser demo session in room: {ctx.room.name}")
-    live_config  = get_live_config()
-    llm_model    = live_config.get("llm_model",    "gpt-4o-mini")
-    tts_language = live_config.get("tts_language", "hi-IN")
-    tts_voice    = live_config.get("tts_voice",    "rohan")
-    stt_language = live_config.get("stt_language", "hi-IN")
-    first_line   = live_config.get("first_line",   "Namaste! Welcome. How can I help you today?")
 
+    live_config       = get_live_config()
+    llm_model         = live_config.get("llm_model", "gpt-4o-mini")
+    tts_language      = live_config.get("tts_language", "hi-IN")
+    tts_voice         = live_config.get("tts_voice", "rohan")
     base_instructions = live_config.get("agent_instructions", "")
+    first_line        = live_config.get("first_line") or get_multilingual_greeting("auto")
 
+    # ── Build TTS: Sarvam primary, ElevenLabs fallback ──────────────────────
+    primary_tts = sarvam.TTS(
+        model="bulbul:v3",
+        speaker=tts_voice,
+        target_language_code=tts_language,
+        enable_preprocessing=True,
+        pace=0.95,
+    )
+
+    fallback_tts = None
+    elevenlabs_voice_id = live_config.get("elevenlabs_voice_id") or os.environ.get("ELEVENLABS_VOICE_ID", "")
+    if elevenlabs_plugin and elevenlabs_voice_id:
+        try:
+            fallback_tts = elevenlabs_plugin.TTS(
+                model="eleven_turbo_v2_5",
+                voice_id=elevenlabs_voice_id,
+            )
+            logger.info("[DEMO] TTS fallback: ElevenLabs ready")
+        except Exception as e:
+            logger.warning(f"[DEMO] TTS fallback init failed: {e}")
+
+    # ── Build Agent ──────────────────────────────────────────────────────────
     agent = AutoLanguageAgent(
         base_instructions=base_instructions,
         first_line=first_line,
     )
 
-
-    from livekit.plugins import silero
+    # ── Build VAD ────────────────────────────────────────────────────────────
     vad = silero.VAD.load(
         min_speech_duration=0.05,
         min_silence_duration=0.8,
@@ -549,26 +572,11 @@ async def run_demo_session(ctx: JobContext):
         prefix_padding_duration=0.1,
     )
 
-    tts_provider = live_config.get("tts_provider", "sarvam")
-
-    if tts_provider == "elevenlabs" and elevenlabs_plugin:
-        demo_tts = elevenlabs_plugin.TTS(
-            model="eleven_turbo_v2_5",
-            voice_id=live_config.get("elevenlabs_voice_id", "21m00Tcm4TlvDq8ikWAM"),
-        )
-    else:
-        demo_tts = sarvam.TTS(
-            model="bulbul:v3",
-            speaker=get_lang_config("hi-IN")["speaker"],
-            target_language_code="hi-IN",
-            enable_preprocessing=True,
-            pace=0.95,
-        )
-
+    # ── Build Session ────────────────────────────────────────────────────────
     session = AgentSession(
         stt=sarvam.STT(model="saaras:v3", language="unknown", mode="transcribe"),
         llm=openai.LLM(model=llm_model),
-        tts=demo_tts,
+        tts=primary_tts,
         vad=vad,
         turn_detection="stt",
         min_interruption_duration=0.0,
@@ -578,47 +586,72 @@ async def run_demo_session(ctx: JobContext):
         allow_interruptions=True,
     )
 
+    # ── Interrupt hooks ──────────────────────────────────────────────────────
     @session.on("user_speech_started")
     def on_user_speech_started_demo():
         session.interrupt()
-        logger.info("[INTERRUPT] Hard interrupt triggered on speech start (demo)")
+        logger.info("INTERRUPT demo speech start")
 
     @session.on("user_speech_committed")
     def on_user_speech_committed_demo(ev):
-        if getattr(ev, "transcript", "") and len(ev.transcript) > 2:
+        if getattr(ev, "transcript", None) and len(ev.transcript) > 2:
             session.interrupt()
 
-    # Give agent a reference to session so it can swap TTS on detection
-    agent._session_ref = session
-
+    # ── Give agent a ref to session for TTS language swap ───────────────────
+    agent.session_ref = session
     await session.start(room=ctx.room, agent=agent)
 
-    # Greet in "auto" neutral language before detection
-    greeting = live_config.get("first_line") or get_multilingual_greeting("auto")
-    
-    import asyncio
-    try:
-        # Avoid hanging forever if Sarvam TTS is flaky
-        await asyncio.wait_for(
-            session.say(greeting, allow_interruptions=True),
-            timeout=8.0,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("[DEMO] greeting timed out, continuing anyway")
-    except Exception as e:
-        logger.warning(f"[DEMO] greeting failed: {e}")
+    # ── Resilient greeting ───────────────────────────────────────────────────
+    async def safe_say(text: str, timeout: float = 8.0):
+        """Try Sarvam TTS first; fall back to ElevenLabs; then just log and continue."""
+        async def _say_with_tts(tts_engine):
+            old = session.tts
+            session.tts = tts_engine
+            try:
+                await asyncio.wait_for(
+                    session.say(text, allow_interruptions=True),
+                    timeout=timeout,
+                )
+                return True
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"[DEMO] TTS attempt failed ({type(tts_engine).__name__}): {e}")
+                return False
+            finally:
+                session.tts = old
 
+        # Attempt 1: Sarvam
+        ok = await _say_with_tts(primary_tts)
+        if ok:
+            return
+
+        # Attempt 2: ElevenLabs fallback
+        if fallback_tts:
+            logger.info("[DEMO] falling back to ElevenLabs TTS")
+            ok = await _say_with_tts(fallback_tts)
+            if ok:
+                return
+
+        # All providers failed — session still alive, user can speak
+        logger.error("[DEMO] all TTS providers failed for greeting, continuing without audio")
+
+    await safe_say(first_line, timeout=8.0)
     logger.info("[DEMO] Session live.")
-    
-    # Wait for the browser participant to leave
-    import asyncio
+
+    # ── Wait for browser participant to leave ────────────────────────────────
     disconnect_event = asyncio.Event()
 
-    @ctx.room.on("participant_disconnected")
     def on_disconnect(participant):
+        logger.info(f"[DEMO] Participant disconnected: {participant.identity}")
         disconnect_event.set()
 
-    await disconnect_event.wait()
+    ctx.room.on_participant_disconnected(on_disconnect)
+
+    # Safety timeout: auto-end demo after 10 minutes
+    try:
+        await asyncio.wait_for(disconnect_event.wait(), timeout=600)
+    except asyncio.TimeoutError:
+        logger.info("[DEMO] Session timeout (10 min), ending job.")
+
     logger.info(f"[DEMO] Participant left, ending job: {ctx.room.name}")
 
 
