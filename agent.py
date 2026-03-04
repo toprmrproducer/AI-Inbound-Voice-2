@@ -781,6 +781,9 @@ async def entrypoint(ctx: JobContext):
 
     # ── (already connected above for demo routing) ──────────────────────
 
+    # ── Load live config early (needed for SIP trunk ID and all agent settings) ──
+    live_config = get_live_config(phone_number)
+
     # ── Outbound: dial via Vobiz SIP trunk ────────────────────────────────
     if call_type == "outbound" and phone_number:
         try:
@@ -793,7 +796,7 @@ async def entrypoint(ctx: JobContext):
             sip_trunk_id = (
                 os.environ.get("OUTBOUND_TRUNK_ID") 
                 or os.environ.get("SIP_TRUNK_ID") 
-                or config.get("sip_trunk_id", "")
+                or live_config.get("sip_trunk_id", "")
             )
             
             if not sip_trunk_id:
@@ -844,7 +847,7 @@ async def entrypoint(ctx: JobContext):
 
 
     # ── Read live configuration ───────────────────────────────────────────
-    live_config = get_live_config(phone_number)
+    # (live_config already loaded above before the SIP outbound block)
     delay_setting = live_config.get("stt_min_endpointing_delay", 0.05)
     llm_model = live_config.get("llm_model", "gpt-4o-mini")
     llm_provider = live_config.get("llm_provider", "openai")
