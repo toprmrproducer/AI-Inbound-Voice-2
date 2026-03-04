@@ -60,14 +60,11 @@ from livekit.agents import (
     Agent,
     AgentSession,
     JobContext,
+    RoomInputOptions,
     WorkerOptions,
     cli,
     llm,
 )
-try:
-    from livekit.agents import RoomInputOptions  # kept for compat, may be deprecated
-except ImportError:
-    RoomInputOptions = None
 try:
     from livekit.agents import noise_cancellation as _nc
 except ImportError:
@@ -450,9 +447,19 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
         super().__init__(instructions=final_instructions, tools=tools)
 
     async def on_enter(self):
-        # Greeting is sent from entrypoint after session.start() where session exists.
-        # on_enter() fires before self.session is set, so we cannot call self.session here.
-        pass
+        # #28 — Dynamic greeting from config
+        greeting = (
+            self._live_config.get("opening_greeting")
+            or self._first_line
+            or (
+                "Namaste! Welcome to Daisy's Med Spa. "
+                "Main aapki kaise madad kar sakti hoon? "
+                "I can answer questions about our treatments or help you book an appointment."
+            )
+        )
+        await self.session.generate_reply(
+            instructions=f"Say exactly this phrase: '{greeting}'"
+        )
 
 
 
@@ -481,33 +488,29 @@ class AutoLanguageAgent(Agent):
         if not self.language_locked:
             detected = getattr(new_message, "language", None)
             if not detected:
+                # Try nested transcript attribute
                 try:
                     detected = new_message.content[0].language  # type: ignore[attr-defined]
                 except Exception:
                     detected = None
-
             if detected and detected not in ("unknown", "", None) and detected in LANGUAGE_CONFIG:
                 self.detected_language = detected
                 self.language_locked = True
-                logger.info(f"[LANG] Detected {detected} ({get_lang_config(detected)['name']}), locking in")
+                logger.info(f"[LANG] Detected: {detected} ({get_lang_config(detected)['name']}) — locking in")
+                # Update system prompt to enforce the detected language
                 self.instructions = build_multilang_system_prompt(detected, self._base_instructions)
-
-                if self.session_ref is not None:
+                # Swap TTS on the session if available
+                if self._session_ref is not None:
                     cfg = get_lang_config(detected)
                     try:
-                        new_tts = sarvam.TTS(
+                        self._session_ref._tts = sarvam.TTS(
                             model="bulbul:v3",
                             speaker=cfg["speaker"],
                             target_language_code=cfg["tts_lang"],
-                            enable_preprocessing=True,
-                            pace=0.95,
                         )
-                        self.session_ref.tts = new_tts
-                        logger.info(f"[LANG] TTS swapped to {cfg['name']} speaker={cfg['speaker']}")
+                        logger.info(f"[LANG] TTS swapped to {cfg['name']} (speaker={cfg['speaker']})")
                     except Exception as e:
                         logger.warning(f"[LANG] TTS swap failed: {e}")
-                        # don't crash — keep old TTS
-
         await super().on_user_turn_completed(turn_ctx, new_message)
 
 
@@ -517,46 +520,27 @@ class AutoLanguageAgent(Agent):
 
 async def run_demo_session(ctx: JobContext):
     """
-    Handles a browser-based WebRTC demo call.
-    Hardened against Sarvam TTS WebSocket drops.
+    Handles a browser-based demo call via LiveKit WebRTC.
+    Visitor has already joined the room from /demo/<slug>.
+    Uses the same voice pipeline as regular inbound calls.
     """
     logger.info(f"[DEMO] Browser demo session in room: {ctx.room.name}")
+    live_config  = get_live_config()
+    llm_model    = live_config.get("llm_model",    "gpt-4o-mini")
+    tts_language = live_config.get("tts_language", "hi-IN")
+    tts_voice    = live_config.get("tts_voice",    "rohan")
+    stt_language = live_config.get("stt_language", "hi-IN")
+    first_line   = live_config.get("first_line",   "Namaste! Welcome. How can I help you today?")
 
-    live_config       = get_live_config()
-    llm_model         = live_config.get("llm_model", "gpt-4o-mini")
-    tts_language      = live_config.get("tts_language", "hi-IN")
-    tts_voice         = live_config.get("tts_voice", "rohan")
     base_instructions = live_config.get("agent_instructions", "")
-    first_line        = live_config.get("first_line") or get_multilingual_greeting("auto")
 
-    # ── Build TTS: Sarvam primary, ElevenLabs fallback ──────────────────────
-    primary_tts = sarvam.TTS(
-        model="bulbul:v3",
-        speaker=tts_voice,
-        target_language_code=tts_language,
-        enable_preprocessing=True,
-        pace=0.95,
-    )
-
-    fallback_tts = None
-    elevenlabs_voice_id = live_config.get("elevenlabs_voice_id") or os.environ.get("ELEVENLABS_VOICE_ID", "")
-    if elevenlabs_plugin and elevenlabs_voice_id:
-        try:
-            fallback_tts = elevenlabs_plugin.TTS(
-                model="eleven_turbo_v2_5",
-                voice_id=elevenlabs_voice_id,
-            )
-            logger.info("[DEMO] TTS fallback: ElevenLabs ready")
-        except Exception as e:
-            logger.warning(f"[DEMO] TTS fallback init failed: {e}")
-
-    # ── Build Agent ──────────────────────────────────────────────────────────
     agent = AutoLanguageAgent(
         base_instructions=base_instructions,
         first_line=first_line,
     )
 
-    # ── Build VAD ────────────────────────────────────────────────────────────
+
+    from livekit.plugins import silero
     vad = silero.VAD.load(
         min_speech_duration=0.05,
         min_silence_duration=0.8,
@@ -565,11 +549,26 @@ async def run_demo_session(ctx: JobContext):
         prefix_padding_duration=0.1,
     )
 
-    # ── Build Session ────────────────────────────────────────────────────────
+    tts_provider = live_config.get("tts_provider", "sarvam")
+
+    if tts_provider == "elevenlabs" and elevenlabs_plugin:
+        demo_tts = elevenlabs_plugin.TTS(
+            model="eleven_turbo_v2_5",
+            voice_id=live_config.get("elevenlabs_voice_id", "21m00Tcm4TlvDq8ikWAM"),
+        )
+    else:
+        demo_tts = sarvam.TTS(
+            model="bulbul:v3",
+            speaker=get_lang_config("hi-IN")["speaker"],
+            target_language_code="hi-IN",
+            enable_preprocessing=True,
+            pace=0.95,
+        )
+
     session = AgentSession(
         stt=sarvam.STT(model="saaras:v3", language="unknown", mode="transcribe"),
         llm=openai.LLM(model=llm_model),
-        tts=primary_tts,
+        tts=demo_tts,
         vad=vad,
         turn_detection="stt",
         min_interruption_duration=0.0,
@@ -579,72 +578,47 @@ async def run_demo_session(ctx: JobContext):
         allow_interruptions=True,
     )
 
-    # ── Interrupt hooks ──────────────────────────────────────────────────────
     @session.on("user_speech_started")
     def on_user_speech_started_demo():
         session.interrupt()
-        logger.info("INTERRUPT demo speech start")
+        logger.info("[INTERRUPT] Hard interrupt triggered on speech start (demo)")
 
     @session.on("user_speech_committed")
     def on_user_speech_committed_demo(ev):
-        if getattr(ev, "transcript", None) and len(ev.transcript) > 2:
+        if getattr(ev, "transcript", "") and len(ev.transcript) > 2:
             session.interrupt()
 
-    # ── Give agent a ref to session for TTS language swap ───────────────────
-    agent.session_ref = session
+    # Give agent a reference to session so it can swap TTS on detection
+    agent._session_ref = session
+
     await session.start(room=ctx.room, agent=agent)
 
-    # ── Resilient greeting ───────────────────────────────────────────────────
-    async def safe_say(text: str, timeout: float = 8.0):
-        """Try Sarvam TTS first; fall back to ElevenLabs; then just log and continue."""
-        async def _say_with_tts(tts_engine):
-            old = session.tts
-            session.tts = tts_engine
-            try:
-                await asyncio.wait_for(
-                    session.say(text, allow_interruptions=True),
-                    timeout=timeout,
-                )
-                return True
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.warning(f"[DEMO] TTS attempt failed ({type(tts_engine).__name__}): {e}")
-                return False
-            finally:
-                session.tts = old
+    # Greet in "auto" neutral language before detection
+    greeting = live_config.get("first_line") or get_multilingual_greeting("auto")
+    
+    import asyncio
+    try:
+        # Avoid hanging forever if Sarvam TTS is flaky
+        await asyncio.wait_for(
+            session.say(greeting, allow_interruptions=True),
+            timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[DEMO] greeting timed out, continuing anyway")
+    except Exception as e:
+        logger.warning(f"[DEMO] greeting failed: {e}")
 
-        # Attempt 1: Sarvam
-        ok = await _say_with_tts(primary_tts)
-        if ok:
-            return
-
-        # Attempt 2: ElevenLabs fallback
-        if fallback_tts:
-            logger.info("[DEMO] falling back to ElevenLabs TTS")
-            ok = await _say_with_tts(fallback_tts)
-            if ok:
-                return
-
-        # All providers failed — session still alive, user can speak
-        logger.error("[DEMO] all TTS providers failed for greeting, continuing without audio")
-
-    await safe_say(first_line, timeout=8.0)
     logger.info("[DEMO] Session live.")
-
-    # ── Wait for browser participant to leave ────────────────────────────────
+    
+    # Wait for the browser participant to leave
+    import asyncio
     disconnect_event = asyncio.Event()
 
+    @ctx.room.on("participant_disconnected")
     def on_disconnect(participant):
-        logger.info(f"[DEMO] Participant disconnected: {participant.identity}")
         disconnect_event.set()
 
-    ctx.room.on_participant_disconnected(on_disconnect)
-
-    # Safety timeout: auto-end demo after 10 minutes
-    try:
-        await asyncio.wait_for(disconnect_event.wait(), timeout=600)
-    except asyncio.TimeoutError:
-        logger.info("[DEMO] Session timeout (10 min), ending job.")
-
+    await disconnect_event.wait()
     logger.info(f"[DEMO] Participant left, ending job: {ctx.room.name}")
 
 
@@ -684,29 +658,6 @@ async def entrypoint(ctx: JobContext):
                 logger.info(f"[CALL] Outbound → {phone_number}")
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning(f"[METADATA] Parse error: {e} — treating as inbound")
-
-    # Fix 2: Extract phone from room name (inbound SIP pattern: _+91XXXXXXXX_RANDOMID)
-    if not phone_number:
-        room_match = re.search(r'[_/](\+?\d{10,15})[_/]', ctx.room.name)
-        if room_match:
-            phone_number = room_match.group(1)
-            logger.info(f"[PHONE] Extracted from room name: {phone_number}")
-
-    # Fix 2: Extract phone from SIP participant identity (inbound)
-    if not phone_number:
-        await asyncio.sleep(0.3)  # brief wait for SIP participants to register
-        for identity, participant in ctx.room.remote_participants.items():
-            clean_id = identity.lower().replace("sip_", "").replace("sip/", "").replace("sip+", "+")
-            if re.match(r'^\+?\d{10,15}$', clean_id):
-                phone_number = clean_id if clean_id.startswith('+') else f"+{clean_id}"
-                logger.info(f"[PHONE] Extracted from SIP identity '{identity}': {phone_number}")
-                break
-            if participant.name and re.search(r'\+?\d{10,15}', participant.name):
-                name_match = re.search(r'(\+?\d{10,15})', participant.name)
-                if name_match:
-                    phone_number = name_match.group(1)
-                    logger.info(f"[PHONE] Extracted from participant name: {phone_number}")
-                    break
 
     # ── Rate limiting (#37) ────────────────────────────────────────────────
     caller_phone = phone_number or "unknown"
@@ -795,17 +746,11 @@ async def entrypoint(ctx: JobContext):
             logger.warning(f"[MEMORY] Could not load caller history: {e}")
         return ""
 
-    # Fix 9: Non-blocking caller memory — inject after session starts, doesn't delay startup
-    async def _inject_caller_memory():
-        if caller_phone == "unknown":
-            return
-        try:
-            history = await get_caller_history(caller_phone)
-            if history:
-                live_config["agent_instructions"] = live_config.get("agent_instructions", "") + history
-                logger.info(f"[MEMORY] Injected caller history for {caller_phone}")
-        except Exception as e:
-            logger.warning(f"[MEMORY] Failed: {e}")
+    if caller_phone != "unknown":
+        caller_history = await get_caller_history(caller_phone)
+        if caller_history:
+            current = live_config.get("agent_instructions", "")
+            live_config["agent_instructions"] = current + caller_history
 
     # ── Build LLM (#8/#27) ────────────────────────────────────────────────
     if llm_provider == "groq":
@@ -867,15 +812,14 @@ async def entrypoint(ctx: JobContext):
         sentences = re.split(r'(?<=[।.!?])\s+', agent_response.strip())
         return sentences[0] if sentences else agent_response
 
-    # ── Build room options (Fix 8: RoomInputOptions deprecated; handle both APIs) ──
-    _room_input_opts = None
+    # ── Start Sarvam-powered session (#1 #2 #3 #6) ────────────────────────
+    _room_input_opts = RoomInputOptions(close_on_disconnect=False)
     if _nc is not None:
         try:
-            if RoomInputOptions is not None:
-                _room_input_opts = RoomInputOptions(
-                    close_on_disconnect=False,
-                    noise_cancellation=_nc.BVC(),
-                )
+            _room_input_opts = RoomInputOptions(
+                close_on_disconnect=False,
+                noise_cancellation=_nc.BVC(),
+            )
             logger.info("[AUDIO] BVC noise cancellation enabled")
         except Exception as e:
             logger.warning(f"[AUDIO] BVC unavailable: {e}")
@@ -884,7 +828,7 @@ async def entrypoint(ctx: JobContext):
     from livekit.plugins import silero
     vad = silero.VAD.load(
         min_speech_duration=0.05,
-        min_silence_duration=0.6,   # Fix 6: reduced 0.8→0.6s for snappier turn detection
+        min_silence_duration=0.8,
         activation_threshold=0.55,
         deactivation_threshold=0.40,
         prefix_padding_duration=0.1,
@@ -914,79 +858,59 @@ async def entrypoint(ctx: JobContext):
             session.interrupt()
 
 
-    # Fix 8: Use room_input_options kwarg if available, else omit (handles deprecated API)
-    _start_kwargs = dict(room=ctx.room, agent=agent)
-    if _room_input_opts is not None:
-        _start_kwargs["room_input_options"] = _room_input_opts
-    await session.start(**_start_kwargs)
+    await session.start(
+        room=ctx.room,
+        agent=agent,
+        room_input_options=_room_input_opts,
+    )
+
+    # #12 — TTS pre-warming
+    try:
+        await session.tts.prewarm()
+        logger.info("[TTS] Pre-warmed successfully")
+    except Exception as e:
+        logger.warning(f"[TTS] Pre-warm failed (non-critical): {e}")
+
     logger.info("[AGENT] Session live — waiting for caller audio.")
     call_start_time = datetime.now()
 
-    # Prewarm removed: Sarvam TTS has no prewarm() method — it was always failing silently.
-    # The first TTS connection is established on the first say() call instead.
-
-    # Safe no-op: logs active call state (no active_calls table in schema)
+    # #38 — Track active call (in-memory log; no separate DB table needed)
     async def upsert_active_call(status: str):
-        logger.info(f"[ACTIVE_CALL] room={ctx.room.name} phone={caller_phone} status={status}")
-
-    # Fix 9: Inject caller memory non-blocking
-    asyncio.create_task(_inject_caller_memory())
+        logger.info(f"[ACTIVE-CALL] {ctx.room.name} status={status}")
     asyncio.create_task(upsert_active_call("active"))
 
-    # Fix 1+7: Send greeting directly from here — session is fully live, self.session is set.
-    # This replaces the broken on_enter() approach (self.session doesn't exist in on_enter).
-    _greeting = (
-        live_config.get("opening_greeting")
-        or first_line
-        or "Namaste! Welcome to Daisy's Med Spa. Main aapki kaise madad kar sakti hoon?"
-    )
-    logger.info(f"[GREETING] Sending: {_greeting[:60]}...")
-    asyncio.create_task(session.say(_greeting, allow_interruptions=True))
-
-    # Fix 3: Recording — non-blocking, handles egress limit, always closes aiohttp session
+    # ── Start call recording → Cloudflare R2 (via LiveKit egress) ─────────────
+    # Requires: R2_ACCESS_KEY, R2_SECRET_KEY, R2_ENDPOINT, R2_BUCKET in env.
     egress_id = None
-    async def _start_recording():
-        nonlocal egress_id
-        rec_api = None
-        try:
-            rec_api = api.LiveKitAPI(
-                url=os.environ["LIVEKIT_URL"],
-                api_key=os.environ["LIVEKIT_API_KEY"],
-                api_secret=os.environ["LIVEKIT_API_SECRET"],
+    try:
+        rec_api = api.LiveKitAPI(
+            url=os.environ["LIVEKIT_URL"],
+            api_key=os.environ["LIVEKIT_API_KEY"],
+            api_secret=os.environ["LIVEKIT_API_SECRET"],
+        )
+        egress_resp = await rec_api.egress.start_room_composite_egress(
+            api.RoomCompositeEgressRequest(
+                room_name=ctx.room.name,
+                audio_only=True,
+                file_outputs=[api.EncodedFileOutput(
+                    file_type=api.EncodedFileType.OGG,
+                    filepath=f"recordings/{ctx.room.name}.ogg",
+                    s3=api.S3Upload(
+                        access_key=os.environ.get("R2_ACCESS_KEY", ""),
+                        secret=os.environ.get("R2_SECRET_KEY", ""),
+                        bucket=os.environ.get("R2_BUCKET", "call-recordings"),
+                        region="auto",
+                        endpoint=os.environ.get("R2_ENDPOINT", ""),
+                        force_path_style=False,
+                    )
+                )]
             )
-            egress_resp = await rec_api.egress.start_room_composite_egress(
-                api.RoomCompositeEgressRequest(
-                    room_name=ctx.room.name,
-                    audio_only=True,
-                    file_outputs=[api.EncodedFileOutput(
-                        file_type=api.EncodedFileType.OGG,
-                        filepath=f"recordings/{ctx.room.name}.ogg",
-                        s3=api.S3Upload(
-                            access_key=os.environ.get("R2_ACCESS_KEY", ""),
-                            secret=os.environ.get("R2_SECRET_KEY", ""),
-                            bucket=os.environ.get("R2_BUCKET", "call-recordings"),
-                            region="auto",
-                            endpoint=os.environ.get("R2_ENDPOINT", ""),
-                            force_path_style=False,
-                        )
-                    )]
-                )
-            )
-            egress_id = egress_resp.egress_id
-            logger.info(f"[RECORDING] Started egress: {egress_id}")
-        except Exception as e:
-            err = str(e).lower()
-            if "resource_exhausted" in err or "limit" in err or "egress" in err:
-                logger.warning("[RECORDING] Skipped — LiveKit egress limit reached (upgrade plan or disable recording)")
-            else:
-                logger.warning(f"[RECORDING] Failed: {e}")
-        finally:
-            if rec_api is not None:
-                try:
-                    await rec_api.aclose()  # CRITICAL: always close to avoid unclosed session warnings
-                except Exception:
-                    pass
-    asyncio.create_task(_start_recording())
+        )
+        egress_id = egress_resp.egress_id
+        await rec_api.aclose()
+        logger.info(f"[RECORDING] Started egress: {egress_id}")
+    except Exception as e:
+        logger.warning(f"[RECORDING] Failed to start recording: {e}")
 
     @session.on("agent_speech_started")
     def _agent_speech_started(ev):
