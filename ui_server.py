@@ -2180,10 +2180,12 @@ async function submitTrunk() {{
   const pool = (document.getElementById('tf-pool').value||'').split('\n').map(n=>n.trim()).filter(Boolean);
   let body, endpoint;
   if (_trunkType === 'outbound') {{
-    body = {{ name, provider, sip_address: document.getElementById('tf-sip')?.value||'', auth_username: document.getElementById('tf-user')?.value||'', auth_password: document.getElementById('tf-pass')?.value||'', number_pool: pool, max_concurrent_calls: parseInt(document.getElementById('tf-conc')?.value||10), max_calls_per_number_per_day: parseInt(document.getElementById('tf-mpd')?.value||150) }};
+    var _sipEl=document.getElementById('tf-sip'), _userEl=document.getElementById('tf-user'), _passEl=document.getElementById('tf-pass'), _concEl=document.getElementById('tf-conc'), _mpdEl=document.getElementById('tf-mpd');
+    body = {{ name: name, provider: provider, sip_address: (_sipEl&&_sipEl.value)||'', auth_username: (_userEl&&_userEl.value)||'', auth_password: (_passEl&&_passEl.value)||'', number_pool: pool, max_concurrent_calls: parseInt((_concEl&&_concEl.value)||10), max_calls_per_number_per_day: parseInt((_mpdEl&&_mpdEl.value)||150) }};
     endpoint = '/api/telephony/trunks/outbound';
   }} else {{
-    const allowed = (document.getElementById('tf-allowed')?.value||'').split('\n').map(n=>n.trim()).filter(Boolean);
+    var _allowedEl = document.getElementById('tf-allowed');
+    const allowed = ((_allowedEl&&_allowedEl.value)||'').split('\n').map(n=>n.trim()).filter(Boolean);
     body = {{ name, provider, numbers: pool, allowed_addresses: allowed }};
     endpoint = '/api/telephony/trunks/inbound';
   }}
@@ -2205,7 +2207,9 @@ async function syncLiveKit() {{
   if (btn) btn.textContent = '⟳ Syncing...';
   try {{
     const r = await fetch('/api/telephony/trunks/livekit/sync').then(x=>x.json());
-    alert(`LiveKit Trunks\\nOutbound: ${{r.outbound?.length||0}}\\nInbound: ${{r.inbound?.length||0}}`);
+    var _ob = r.outbound ? r.outbound.length : 0;
+    var _ib = r.inbound ? r.inbound.length : 0;
+    alert('LiveKit Trunks\nOutbound: ' + _ob + '\nInbound: ' + _ib);
   }} catch(e) {{ alert('Sync error: '+e.message); }}
   finally {{ if (btn) btn.textContent = '↻ Sync LiveKit'; }}
 }}
