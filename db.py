@@ -68,34 +68,6 @@ def init_db():
                     reason TEXT,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
-                -- Safe migration: add language column to existing tables
-                ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto';
-                -- Safe migrations: add new columns to call_logs (existing DBs won't have these)
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS audio_codec TEXT;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS stt_provider TEXT;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS tts_provider TEXT;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS estimated_cost_usd NUMERIC(10,5);
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_hour INTEGER;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_day_of_week TEXT;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS interrupt_count INTEGER DEFAULT 0;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS caller_name TEXT;
-                -- Safe migrations: sip_trunks (table may exist without new columns)
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS sip_uri TEXT;
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS username TEXT;
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS password TEXT;
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS caller_id_number TEXT;
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
-                -- Safe migrations: campaigns
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS phone_numbers TEXT DEFAULT '';
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sip_trunk_id INTEGER;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_concurrent_calls INTEGER DEFAULT 5;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS notes TEXT;
-                CREATE INDEX IF NOT EXISTS idx_call_logs_phone
-                    ON call_logs (phone);
-                CREATE INDEX IF NOT EXISTS idx_call_logs_created
-                    ON call_logs (created_at);
-                CREATE INDEX IF NOT EXISTS idx_demo_links_slug
-                    ON demo_links (slug);
                 CREATE TABLE IF NOT EXISTS sip_trunks (
                     id SERIAL PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -126,6 +98,36 @@ def init_db():
                     last_attempt_at TIMESTAMPTZ,
                     scheduled_time TIMESTAMPTZ
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_call_logs_phone
+                    ON call_logs (phone);
+                CREATE INDEX IF NOT EXISTS idx_call_logs_created
+                    ON call_logs (created_at);
+                CREATE INDEX IF NOT EXISTS idx_demo_links_slug
+                    ON demo_links (slug);
+
+                -- Safe migrations: add new columns to existing tables
+                ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto';
+                
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS audio_codec TEXT;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS stt_provider TEXT;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS tts_provider TEXT;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS estimated_cost_usd NUMERIC(10,5);
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_hour INTEGER;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_day_of_week TEXT;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS interrupt_count INTEGER DEFAULT 0;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS caller_name TEXT;
+                
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS sip_uri TEXT;
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS username TEXT;
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS password TEXT;
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS caller_id_number TEXT;
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+                
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS phone_numbers TEXT DEFAULT '';
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sip_trunk_id INTEGER;
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_concurrent_calls INTEGER DEFAULT 5;
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS notes TEXT;
             """)
             conn.commit()
     logger.info("[DB] Tables initialized successfully")
