@@ -213,6 +213,11 @@ async def api_outbound_call(request: Request):
     phone_number = data.get("phone_number", "").strip()
     if not phone_number or not phone_number.startswith("+"):
         raise HTTPException(400, "Phone number must start with + and include country code")
+    import db
+    if db.is_in_dnc(phone_number):
+        logger.warning(f"Blocked outbound call to {phone_number} (DNC)")
+        raise HTTPException(403, "Number is on the Do-Not-Call list")
+        
     config = read_config()
     url = config.get("livekit_url") or os.getenv("LIVEKIT_URL", "")
     api_key = config.get("livekit_api_key") or os.getenv("LIVEKIT_API_KEY", "")
@@ -280,9 +285,17 @@ async def _run_bulk_campaign(job_id: str, numbers: list):
     pool_str = config.get("vobiz_number_pool", "")
     pool = [n.strip() for n in pool_str.replace(" ", "").split(",") if n.strip()] if pool_str else []
     
+    import db
     for phone in numbers:
         if bulk_campaigns.get(job_id, {}).get("status") == "stopped":
             break
+            
+        if db.is_in_dnc(phone):
+            logger.warning(f"Skipping {phone} in bulk campaign (DNC)")
+            bulk_campaigns[job_id]["results"].append({"phone": phone, "status": "skipped (DNC)"})
+            bulk_campaigns[job_id]["done"] += 1
+            continue
+            
         result = {"phone": phone, "status": "pending"}
         try:
             import random
@@ -322,6 +335,25 @@ async def api_bulk_stop(job_id: str):
     if job_id in bulk_campaigns:
         bulk_campaigns[job_id]["status"] = "stopped"
     return {"status": "stopped"}
+
+@app.post("/api/dnc")
+async def api_dnc_toggle(request: Request):
+    data = await request.json()
+    phone = data.get("phone", "").strip()
+    action = data.get("action", "add") # 'add' or 'remove'
+    if not phone:
+        raise HTTPException(400, "Phone number required")
+    
+    import db
+    if action == "add":
+        success = db.add_to_dnc(phone, reason="Added via Dashboard")
+    else:
+        success = db.remove_from_dnc(phone)
+        
+    if success:
+        return {"status": "success", "phone": phone, "action": action}
+    else:
+        raise HTTPException(500, "Database operation failed")
 
 # ── Demo Link Endpoints (PostgreSQL-backed) ───────────────────────────────────
 
@@ -1516,10 +1548,30 @@ async function loadLogs() {{
         <td>
           ${{log.id ? `<a class="btn btn-ghost btn-sm" style="text-decoration:none;" href="/api/logs/${{log.id}}/transcript" download="transcript_${{log.id}}.txt">⬇ Transcript</a>` : '—'}}
           ${{log.recording_url ? `<a class="btn btn-ghost btn-sm" style="text-decoration:none;margin-left:4px;" href="${{log.recording_url}}" target="_blank">🎧 Recording</a>` : ''}}
+          <button class="btn btn-ghost btn-sm" style="color:var(--red);margin-left:4px;" onclick="toggleDNC('${{log.phone_number}}')">🚫 Block</button>
         </td>
       </tr>`).join('');
   }} catch(e) {{
     tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:#ef4444;">Error loading logs. Check Supabase credentials.</td></tr>';
+  }}
+}}
+
+async function toggleDNC(phone) {{
+  if (!confirm(`Add ${{phone}} to the Do-Not-Call (DNC) list? Outbound campaigns will skip this number.`)) return;
+  try {{
+    const r = await fetch('/api/dnc', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{phone: phone, action: 'add'}})
+    }});
+    if (r.ok) {{
+      alert(`✅ ${{phone}} added to DNC list`);
+    }} else {{
+      const d = await r.json();
+      alert(`❌ Error: ${{d.detail || 'Failed to add to DNC'}}`);
+    }}
+  }} catch(e) {{
+    alert(`❌ Request failed: ${{e}}`);
   }}
 }}
 

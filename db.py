@@ -51,6 +51,11 @@ def init_db():
                     is_active BOOLEAN DEFAULT TRUE,
                     total_sessions INTEGER DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS call_dnc (
+                    phone TEXT PRIMARY KEY,
+                    reason TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
                 -- Safe migration: add language column to existing tables
                 ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto';
                 -- Safe migrations: add new columns to call_logs (existing DBs won't have these)
@@ -127,6 +132,45 @@ def log_transcript_line(call_room_id, phone, role, content):
     except Exception as e:
         logger.warning(f"[DB] Transcript line failed: {e}")
 
+
+def is_in_dnc(phone: str) -> bool:
+    """Check if a phone number is in the Do-Not-Call list."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM call_dnc WHERE phone = %s", (phone,))
+                return bool(cur.fetchone())
+    except Exception as e:
+        logger.error(f"[DB] Failed to check DNC for {phone}: {e}")
+        return False
+
+def add_to_dnc(phone: str, reason: str = None) -> bool:
+    """Add a phone number to the Do-Not-Call list."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO call_dnc (phone, reason)
+                    VALUES (%s, %s)
+                    ON CONFLICT (phone) DO NOTHING
+                """, (phone, reason))
+                conn.commit()
+                return True
+    except Exception as e:
+        logger.error(f"[DB] Failed to add {phone} to DNC: {e}")
+        return False
+
+def remove_from_dnc(phone: str) -> bool:
+    """Remove a phone number from the Do-Not-Call list."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM call_dnc WHERE phone = %s", (phone,))
+                conn.commit()
+                return True
+    except Exception as e:
+        logger.error(f"[DB] Failed to remove {phone} from DNC: {e}")
+        return False
 
 def fetch_call_logs(limit: int = 50) -> list:
     try:
