@@ -687,9 +687,6 @@ async def run_demo_session(ctx: JobContext):
             model="saaras:v3", 
             language="unknown", 
             mode="transcribe",
-            vad_signals=True,
-            min_silence_ms=250,
-            max_segment_duration_ms=6000,
             flush_signal=True,
         ),
         llm=openai.LLM(model=llm_model),
@@ -896,9 +893,6 @@ async def entrypoint(ctx: JobContext):
             model="saaras:v3",
             mode="transcribe",    # transcribe preserves original language for detection
             flush_signal=True,
-            vad_signals=True,
-            min_silence_ms=250,
-            max_segment_duration_ms=6000,
         )
 
     # ── Build TTS (#10) ───────────────────────────────────────────────────
