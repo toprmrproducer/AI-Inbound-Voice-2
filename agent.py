@@ -542,8 +542,9 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
                 "I can answer questions about our treatments or help you book an appointment."
             )
         )
-        audio_session = AgentAudioSession(session=self.session)
-        await safe_speak(audio_session, greeting, allow_interruptions=True)
+        await self.session.generate_reply(
+            instructions=f"Say exactly this greeting aloud: '{greeting}'"
+        )
 
 
 
@@ -684,22 +685,23 @@ async def run_demo_session(ctx: JobContext):
         if getattr(ev, "transcript", "") and len(ev.transcript) > 2:
             session.interrupt()
 
+    # Wait for a browser participant to actually join before starting the session
+    # so the agent's STT properly subscribes to their mic track
+    try:
+        logger.info("[DEMO] Waiting for browser participant to join room...")
+        await asyncio.wait_for(ctx.wait_for_participant(), timeout=60.0)
+        logger.info("[DEMO] Browser participant joined, starting session")
+    except asyncio.TimeoutError:
+        logger.warning("[DEMO] No participant joined within 60s, starting anyway")
+
     # Give agent a reference to session so it can swap TTS on detection
     agent._session_ref = session
 
     await session.start(room=ctx.room, agent=agent)
 
-    # Greet in "auto" neutral language before detection
-    greeting = live_config.get("first_line") or get_multilingual_greeting("auto")
-    
-    import asyncio
-    # safe_speak swallows Sarvam TTS errors so the job never dies
-    await safe_speak(session, greeting, allow_interruptions=True)
-
     logger.info("[DEMO] Session live.")
-    
+
     # Wait for the browser participant to leave
-    import asyncio
     disconnect_event = asyncio.Event()
 
     @ctx.room.on("participant_disconnected")

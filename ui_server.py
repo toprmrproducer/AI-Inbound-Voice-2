@@ -558,7 +558,7 @@ async def demo_page(slug: str):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{label} \u2014 Live AI Demo</title>
+    <title>{label} — Live AI Demo</title>
     <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.5/dist/livekit-client.umd.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -627,6 +627,20 @@ async def demo_page(slug: str):
         .dot.connecting {{ background: #f59e0b; animation: pulse 0.7s infinite; }}
         .dot.error {{ background: #ef4444; }}
         @keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.25; }} }}
+        .mic-bar-wrap {{
+            margin-top: 16px; display: none; align-items: center; gap: 10px;
+            font-size: 12px; color: #8b949e;
+        }}
+        .mic-bar-wrap.visible {{ display: flex; }}
+        .mic-bar {{
+            flex: 1; height: 6px; background: rgba(255,255,255,0.08);
+            border-radius: 3px; overflow: hidden;
+        }}
+        .mic-fill {{
+            height: 100%; width: 0%;
+            background: linear-gradient(90deg, #22c55e, #16a34a);
+            border-radius: 3px; transition: width 0.08s ease;
+        }}
         .hint {{ margin-top: 22px; font-size: 12px; color: #30363d; line-height: 1.7; }}
         .powered {{ margin-top: 36px; font-size: 11px; color: #30363d; }}
     </style>
@@ -652,13 +666,23 @@ async def demo_page(slug: str):
             <span id="statusText">Ready — click to begin</span>
         </div>
 
+        <div class="mic-bar-wrap" id="micBarWrap">
+            🎤
+            <div class="mic-bar">
+                <div class="mic-fill" id="micFill"></div>
+            </div>
+        </div>
+
         <p class="hint">🔒 Your audio is private and not permanently stored.<br>Microphone access is required to speak with the agent.</p>
         <p class="powered">Powered by AI Voice Agent Platform</p>
     </div>
 
+    <audio id="agentAudio" autoplay playsinline style="display:none"></audio>
+
     <script>
         const SLUG = "{slug}";
         let room = null;
+        let micAnalyser = null, micAnimFrame = null;
 
         function setStatus(text, state) {{
             document.getElementById('statusText').textContent = text;
@@ -666,11 +690,41 @@ async def demo_page(slug: str):
             dot.className = 'dot' + (state ? ' ' + state : '');
         }}
 
+        function startMicVisualizer(stream) {{
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const src = ctx.createMediaStreamSource(stream);
+            micAnalyser = ctx.createAnalyser();
+            micAnalyser.fftSize = 256;
+            src.connect(micAnalyser);
+            const data = new Uint8Array(micAnalyser.frequencyBinCount);
+            const fill = document.getElementById('micFill');
+            document.getElementById('micBarWrap').classList.add('visible');
+            function tick() {{
+                micAnalyser.getByteFrequencyData(data);
+                const avg = data.reduce((a,b)=>a+b,0)/data.length;
+                fill.style.width = Math.min(100, avg * 2) + '%';
+                micAnimFrame = requestAnimationFrame(tick);
+            }}
+            tick();
+        }}
+
+        function stopMicVisualizer() {{
+            if (micAnimFrame) cancelAnimationFrame(micAnimFrame);
+            document.getElementById('micBarWrap').classList.remove('visible');
+        }}
+
+        function attachRemoteAudio(track) {{
+            const audio = document.getElementById('agentAudio');
+            const ms = new MediaStream([track.mediaStreamTrack]);
+            audio.srcObject = ms;
+            audio.play().catch(e => console.warn('Autoplay blocked:', e));
+        }}
+
         async function startDemo() {{
             const startBtn = document.getElementById('startBtn');
             const stopBtn  = document.getElementById('stopBtn');
             startBtn.disabled = true;
-            setStatus('Connecting\u2026', 'connecting');
+            setStatus('Connecting…', 'connecting');
 
             try {{
                 const res = await fetch('/api/demo/token/' + SLUG);
@@ -687,35 +741,58 @@ async def demo_page(slug: str):
                     startBtn.style.display = 'flex';
                     startBtn.disabled = false;
                     stopBtn.style.display = 'none';
+                    stopMicVisualizer();
                 }});
 
+                // Detect agent joining — any participant that is NOT our visitor is the agent
                 room.on(LivekitClient.RoomEvent.ParticipantConnected, (p) => {{
-                    if (p.identity && p.identity.startsWith('agent')) {{
-                        setStatus('Agent is live \u2014 speak now', 'live');
+                    if (!p.identity.startsWith('visitor-')) {{
+                        setStatus('Agent is live — speak now 🎙️', 'live');
                     }}
                 }});
 
-                room.on(LivekitClient.RoomEvent.ConnectionStateChanged, (state) => {{
-                    if (state === 'connected') setStatus('Waiting for agent to join\u2026', 'connecting');
+                // If agent is already in the room when we join, trigger immediately
+                room.on(LivekitClient.RoomEvent.Connected, () => {{
+                    const remoteParticipants = [...room.remoteParticipants.values()];
+                    const agentPresent = remoteParticipants.some(p => !p.identity.startsWith('visitor-'));
+                    if (agentPresent) {{
+                        setStatus('Agent is live — speak now 🎙️', 'live');
+                    }} else {{
+                        setStatus('Waiting for agent to join…', 'connecting');
+                    }}
+                }});
+
+                // Subscribe to remote audio tracks for TTS playback
+                room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, pub, participant) => {{
+                    if (track.kind === LivekitClient.Track.Kind.Audio && !participant.identity.startsWith('visitor-')) {{
+                        attachRemoteAudio(track);
+                    }}
                 }});
 
                 await room.connect(ws_url, token);
+
+                // Enable mic and start visualizer
+                const stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+                startMicVisualizer(stream);
                 await room.localParticipant.setMicrophoneEnabled(true);
+
                 startBtn.style.display = 'none';
                 stopBtn.style.display = 'flex';
 
             }} catch (err) {{
-                setStatus('\u26a0 ' + err.message, 'error');
+                setStatus('⚠ ' + err.message, 'error');
                 startBtn.disabled = false;
+                stopMicVisualizer();
             }}
         }}
 
         async function stopDemo() {{
             if (room) {{ await room.disconnect(); room = null; }}
+            stopMicVisualizer();
             document.getElementById('startBtn').style.display = 'flex';
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').style.display = 'none';
-            setStatus('Call ended \u2014 click to start again', '');
+            setStatus('Call ended — click to start again', '');
         }}
     </script>
 </body>
