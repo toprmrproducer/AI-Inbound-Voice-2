@@ -90,6 +90,11 @@ def read_config():
         "telegram_chat_id": get_val("telegram_chat_id", "TELEGRAM_CHAT_ID", ""),
         "supabase_url": get_val("supabase_url", "SUPABASE_URL", ""),
         "supabase_key": get_val("supabase_key", "SUPABASE_KEY", ""),
+        "vobiz_sip_domain": get_val("vobiz_sip_domain", "VOBIZ_SIP_DOMAIN", ""),
+        "vobiz_username": get_val("vobiz_username", "VOBIZ_USERNAME", ""),
+        "vobiz_password": get_val("vobiz_password", "VOBIZ_PASSWORD", ""),
+        "vobiz_outbound_number": get_val("vobiz_outbound_number", "VOBIZ_OUTBOUND_NUMBER", ""),
+        "vobiz_number_pool": get_val("vobiz_number_pool", "VOBIZ_NUMBER_POOL", ""),
         **config
     }
 
@@ -214,20 +219,40 @@ async def api_outbound_call(request: Request):
     api_secret = config.get("livekit_api_secret") or os.getenv("LIVEKIT_API_SECRET", "")
     if not (url and api_key and api_secret):
         raise HTTPException(400, "LiveKit credentials not configured")
+        
+    sip_trunk_id = config.get("sip_trunk_id", "")
+    
+    # --- Masking Logic ---
+    from_number = config.get("vobiz_outbound_number", "").strip()
+    pool_str = config.get("vobiz_number_pool", "")
+    if pool_str:
+        pool = [n.strip() for n in pool_str.replace(" ", "").split(",") if n.strip()]
+        if pool:
+            import random
+            from_number = random.choice(pool)
+            logger.info(f"Picked random mask number: {from_number}")
+            
     try:
         import random
         from livekit import api as lk_api_mod
         lk = lk_api_mod.LiveKitAPI(url=url, api_key=api_key, api_secret=api_secret)
         room = f"call-{phone_number.replace('+','')}-{random.randint(1000,9999)}"
+        
+        md = {"phone_number": phone_number}
+        if sip_trunk_id:
+            md["sip_trunk_id"] = sip_trunk_id
+        if from_number:
+            md["from_number"] = from_number
+            
         dispatch = await lk.agent_dispatch.create_dispatch(
             lk_api_mod.CreateAgentDispatchRequest(
                 agent_name="outbound-caller",
                 room=room,
-                metadata=json.dumps({"phone_number": phone_number})
+                metadata=json.dumps(md)
             )
         )
         await lk.aclose()
-        return {"status": "dispatched", "dispatch_id": dispatch.id, "room": room, "phone": phone_number}
+        return {"status": "dispatched", "dispatch_id": dispatch.id, "room": room, "phone": phone_number, "mask": from_number}
     except Exception as e:
         logger.error(f"Outbound dispatch error: {e}")
         raise HTTPException(500, str(e))
@@ -248,6 +273,13 @@ async def _run_bulk_campaign(job_id: str, numbers: list):
     url = config.get("livekit_url") or os.getenv("LIVEKIT_URL", "")
     api_key = config.get("livekit_api_key") or os.getenv("LIVEKIT_API_KEY", "")
     api_secret = config.get("livekit_api_secret") or os.getenv("LIVEKIT_API_SECRET", "")
+    sip_trunk_id = config.get("sip_trunk_id", "")
+    
+    # --- Masking Preparation ---
+    base_from_number = config.get("vobiz_outbound_number", "").strip()
+    pool_str = config.get("vobiz_number_pool", "")
+    pool = [n.strip() for n in pool_str.replace(" ", "").split(",") if n.strip()] if pool_str else []
+    
     for phone in numbers:
         if bulk_campaigns.get(job_id, {}).get("status") == "stopped":
             break
@@ -257,10 +289,17 @@ async def _run_bulk_campaign(job_id: str, numbers: list):
             from livekit import api as lk_api_mod
             lk = lk_api_mod.LiveKitAPI(url=url, api_key=api_key, api_secret=api_secret)
             room = f"bulk-{phone.replace('+','')}-{random.randint(1000,9999)}"
+            
+            # Select trunk/mask dynamically for each call
+            from_number = random.choice(pool) if pool else base_from_number
+            md = {"phone_number": phone}
+            if sip_trunk_id: md["sip_trunk_id"] = sip_trunk_id
+            if from_number: md["from_number"] = from_number
+            
             await lk.agent_dispatch.create_dispatch(
                 lk_api_mod.CreateAgentDispatchRequest(
                     agent_name="outbound-caller", room=room,
-                    metadata=json.dumps({"phone_number": phone})
+                    metadata=json.dumps(md)
                 )
             )
             await lk.aclose()
@@ -703,6 +742,11 @@ async def get_dashboard():
     _n8n_url          = e(config.get("n8n_webhook_url", ""))
     _stt_delay        = e(config.get("stt_min_endpointing_delay", 0.6))
     _opening_greeting = e(config.get("opening_greeting", ""))
+    _vobiz_sip_domain = e(config.get("vobiz_sip_domain", ""))
+    _vobiz_username   = e(config.get("vobiz_username", ""))
+    _vobiz_password   = e(config.get("vobiz_password", ""))
+    _vobiz_outbound_number = e(config.get("vobiz_outbound_number", ""))
+    _vobiz_pool       = e(config.get("vobiz_number_pool", ""))
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1323,6 +1367,20 @@ async def get_dashboard():
         <div class="form-group"><label>Supabase Anon Key</label><input type="password" id="supabase_key" value="{_supa_key}"></div>
       </div>
     </div>
+    <div class="section-card">
+      <div class="section-title">SIP Outbound & Masking</div>
+      <div class="form-row">
+        <div class="form-group"><label>Vobiz SIP Domain / IP</label><input type="text" id="vobiz_sip_domain" value="{_vobiz_sip_domain}"></div>
+        <div class="form-group"><label>Vobiz SIP Username</label><input type="text" id="vobiz_username" value="{_vobiz_username}"></div>
+        <div class="form-group"><label>Vobiz SIP Password</label><input type="password" id="vobiz_password" value="{_vobiz_password}"></div>
+        <div class="form-group"><label>Default Outbound Caller ID</label><input type="text" id="vobiz_outbound_number" value="{_vobiz_outbound_number}"></div>
+      </div>
+      <div class="form-group" style="margin-top:12px;">
+        <label>Masking Number Pool (Comma-separated)</label>
+        <textarea id="vobiz_number_pool" rows="2" placeholder="+911234567890, +910987654321">{_vobiz_pool}</textarea>
+        <div class="hint">If provided, outbound calls will randomly select one of these numbers as the Caller ID.</div>
+      </div>
+    </div>
     <div class="save-bar">
       <span class="save-status" id="save-status-credentials">✅ Saved!</span>
       <button class="btn btn-primary" onclick="saveConfig('credentials')">💾 Save Credentials</button>
@@ -1617,6 +1675,9 @@ async function saveConfig(section) {{
       cal_api_key: get('cal_api_key'), cal_event_type_id: get('cal_event_type_id'),
       telegram_bot_token: get('telegram_bot_token'), telegram_chat_id: get('telegram_chat_id'),
       supabase_url: get('supabase_url'), supabase_key: get('supabase_key'),
+      vobiz_sip_domain: get('vobiz_sip_domain'), vobiz_username: get('vobiz_username'),
+      vobiz_password: get('vobiz_password'), vobiz_outbound_number: get('vobiz_outbound_number'),
+      vobiz_number_pool: get('vobiz_number_pool'),
     }});
   }}
 
