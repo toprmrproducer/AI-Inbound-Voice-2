@@ -131,10 +131,9 @@ async def api_get_logs():
 @app.get("/api/logs/{log_id}/transcript")
 async def api_get_transcript(log_id: str):
     import db
+    from psycopg2.extras import RealDictCursor
     try:
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
-        with psycopg2.connect(os.environ["DATABASE_URL"]) as conn:
+        with db.get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT * FROM call_logs WHERE id = %s", (log_id,))
                 data = dict(cur.fetchone() or {})
