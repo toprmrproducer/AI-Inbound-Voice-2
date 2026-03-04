@@ -669,7 +669,7 @@ async def run_demo_session(ctx: JobContext):
         turn_detection="stt",
         min_interruption_duration=0.0,
         min_interruption_words=0,
-        min_endpointing_delay=0.5,
+        min_endpointing_delay=live_config.get("stt_min_endpointing_delay", 0.5),
         preemptive_generation=True,
         allow_interruptions=True,
     )
@@ -1192,12 +1192,48 @@ async def entrypoint(ctx: JobContext):
         ist = pytz.timezone('Asia/Kolkata')
         call_dt = call_start_time.astimezone(ist) if hasattr(call_start_time, 'astimezone') else call_start_time.replace(tzinfo=pytz.utc).astimezone(ist)
 
+        # ── Groq Call Summarization ────────────────────────────────────────────
+        groq_summary = ""
+        groq_api_key = os.environ.get("GROQ_API_KEY", "")
+        if groq_api_key and transcript_text:
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as http:
+                    groq_payload = {
+                        "model": "llama3-70b-8192",
+                        "messages": [
+                            {"role": "system", "content": "You are a concise, factual call summarizer."},
+                            {"role": "user", "content": (
+                                "Summarize the following phone call transcript into 4-6 plain sentences.\n"
+                                "Include: caller intent, key questions, agent responses, objections, final outcome, next steps.\n\n"
+                                f"Transcript:\n\"\"\"\n{transcript_text[:3000]}\n\"\"\""
+                            )},
+                        ],
+                        "temperature": 0.2,
+                        "max_tokens": 512,
+                    }
+                    async with http.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {groq_api_key}", "Content-Type": "application/json"},
+                        json=groq_payload,
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            groq_summary = data["choices"][0]["message"]["content"].strip()
+                            logger.info("[GROQ] Call summary generated successfully")
+                        else:
+                            logger.warning(f"[GROQ] Summarization failed: HTTP {resp.status}")
+            except Exception as e:
+                logger.warning(f"[GROQ] Summarization error: {e}")
+
+        final_summary = groq_summary or booking_status_msg
+
         from db import save_call_log
         save_call_log(
             phone=caller_phone,
             duration=duration,
             transcript=transcript_text,
-            summary=booking_status_msg,
+            summary=final_summary,
             recording_url=recording_url,
             sentiment=sentiment,
             interrupt_count=interrupt_count,

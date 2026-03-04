@@ -75,9 +75,121 @@ def init_db():
                     ON call_logs (created_at);
                 CREATE INDEX IF NOT EXISTS idx_demo_links_slug
                     ON demo_links (slug);
+                CREATE TABLE IF NOT EXISTS sip_trunks (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    sip_uri TEXT NOT NULL,
+                    username TEXT,
+                    password TEXT,
+                    caller_id_number TEXT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS campaigns (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'scheduled',
+                    phone_numbers TEXT NOT NULL DEFAULT '',
+                    sip_trunk_id INTEGER REFERENCES sip_trunks(id),
+                    max_concurrent_calls INTEGER DEFAULT 5,
+                    notes TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS campaign_targets (
+                    id SERIAL PRIMARY KEY,
+                    campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+                    phone TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER DEFAULT 0,
+                    last_attempt_at TIMESTAMPTZ,
+                    scheduled_time TIMESTAMPTZ
+                );
             """)
             conn.commit()
     logger.info("[DB] Tables initialized successfully")
+
+
+# ── SIP Trunks ────────────────────────────────────────────────────────────────
+
+def get_sip_trunks() -> list:
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM sip_trunks WHERE is_active = TRUE ORDER BY created_at DESC")
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"[DB] get_sip_trunks failed: {e}")
+        return []
+
+
+def create_sip_trunk(name, provider, sip_uri, username=None, password=None, caller_id_number=None) -> dict:
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    INSERT INTO sip_trunks (name, provider, sip_uri, username, password, caller_id_number)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (name, provider, sip_uri, username, password, caller_id_number))
+                conn.commit()
+                return dict(cur.fetchone())
+    except Exception as e:
+        logger.error(f"[DB] create_sip_trunk failed: {e}")
+        return {}
+
+
+def delete_sip_trunk(trunk_id: int) -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE sip_trunks SET is_active = FALSE WHERE id = %s", (trunk_id,))
+                conn.commit()
+                return True
+    except Exception as e:
+        logger.error(f"[DB] delete_sip_trunk failed: {e}")
+        return False
+
+
+# ── Campaigns ─────────────────────────────────────────────────────────────────
+
+def get_campaigns() -> list:
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM campaigns ORDER BY created_at DESC")
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"[DB] get_campaigns failed: {e}")
+        return []
+
+
+def create_campaign(name, phone_numbers, sip_trunk_id=None, max_concurrent_calls=5, notes=None) -> dict:
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    INSERT INTO campaigns (name, phone_numbers, sip_trunk_id, max_concurrent_calls, notes)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (name, phone_numbers, sip_trunk_id, max_concurrent_calls, notes))
+                conn.commit()
+                return dict(cur.fetchone())
+    except Exception as e:
+        logger.error(f"[DB] create_campaign failed: {e}")
+        return {}
+
+
+def update_campaign_status(campaign_id: int, status: str) -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaigns SET status = %s WHERE id = %s", (status, campaign_id))
+                conn.commit()
+                return True
+    except Exception as e:
+        logger.error(f"[DB] update_campaign_status failed: {e}")
+        return False
 
 
 def save_call_log(

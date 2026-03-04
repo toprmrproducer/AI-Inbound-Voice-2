@@ -355,7 +355,71 @@ async def api_dnc_toggle(request: Request):
     else:
         raise HTTPException(500, "Database operation failed")
 
+# ── SIP Trunks API ────────────────────────────────────────────────────────────
+
+@app.get("/api/sip-trunks")
+async def api_get_sip_trunks():
+    import db
+    return {"trunks": db.get_sip_trunks()}
+
+@app.post("/api/sip-trunks")
+async def api_create_sip_trunk(request: Request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    provider = data.get("provider", "").strip()
+    sip_uri = data.get("sip_uri", "").strip()
+    username = data.get("username", "").strip() or None
+    password = data.get("password", "").strip() or None
+    caller_id_number = data.get("caller_id_number", "").strip() or None
+    if not name or not provider or not sip_uri:
+        raise HTTPException(400, "name, provider, and sip_uri are required")
+    import db
+    trunk = db.create_sip_trunk(name, provider, sip_uri, username, password, caller_id_number)
+    if not trunk:
+        raise HTTPException(500, "Failed to create SIP trunk")
+    return trunk
+
+@app.delete("/api/sip-trunks/{trunk_id}")
+async def api_delete_sip_trunk(trunk_id: int):
+    import db
+    ok = db.delete_sip_trunk(trunk_id)
+    return {"status": "deleted" if ok else "error"}
+
+# ── Campaigns API ─────────────────────────────────────────────────────────────
+
+@app.get("/api/campaigns")
+async def api_get_campaigns():
+    import db
+    return {"campaigns": db.get_campaigns()}
+
+@app.post("/api/campaigns")
+async def api_create_campaign(request: Request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    phone_numbers = data.get("phone_numbers", "").strip()
+    sip_trunk_id = data.get("sip_trunk_id") or None
+    max_concurrent_calls = int(data.get("max_concurrent_calls", 5))
+    notes = data.get("notes", "").strip() or None
+    if not name or not phone_numbers:
+        raise HTTPException(400, "name and phone_numbers are required")
+    import db
+    campaign = db.create_campaign(name, phone_numbers, sip_trunk_id, max_concurrent_calls, notes)
+    if not campaign:
+        raise HTTPException(500, "Failed to create campaign")
+    return campaign
+
+@app.patch("/api/campaigns/{campaign_id}")
+async def api_update_campaign(campaign_id: int, request: Request):
+    data = await request.json()
+    status = data.get("status", "")
+    if status not in ("scheduled", "running", "paused", "completed"):
+        raise HTTPException(400, "Invalid status")
+    import db
+    ok = db.update_campaign_status(campaign_id, status)
+    return {"status": "updated" if ok else "error"}
+
 # ── Demo Link Endpoints (PostgreSQL-backed) ───────────────────────────────────
+
 
 import secrets, string as _string
 import psycopg2
@@ -1095,6 +1159,8 @@ async def get_dashboard():
     <div class="nav-item" onclick="goTo('credentials', this)"><span class="icon">🔑</span> API Credentials</div>
     <div class="nav-section" style="margin-top:12px;">Calling</div>
     <div class="nav-item" onclick="goTo('outbound', this)"><span class="icon">📤</span> Outbound Calls</div>
+    <div class="nav-item" onclick="goTo('campaigns', this); loadCampaigns();"><span class="icon">📋</span> Campaigns</div>
+    <div class="nav-item" onclick="goTo('sip-trunks', this); loadSipTrunks();"><span class="icon">🔌</span> SIP Trunks</div>
     <div class="nav-item" onclick="goTo('demos', this); loadDemos();"><span class="icon">🔗</span> Demo Links</div>
     <div class="nav-section" style="margin-top:12px;">Data</div>
     <div class="nav-item" onclick="goTo('logs', this); loadLogs();"><span class="icon">📞</span> Call Logs</div>
@@ -1320,6 +1386,34 @@ async def get_dashboard():
       <div class="section-title">Campaign Log</div>
       <div id="outbound-log" style="font-size:13px;color:var(--muted);">No calls dispatched yet.</div>
     </div>
+  </div>
+
+  <!-- ── Campaigns Page ── -->
+  <div id="page-campaigns" class="page">
+    <div class="page-header">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div>
+          <div class="page-title">📋 Campaigns</div>
+          <div class="page-sub">Create named outbound calling campaigns with retry tracking</div>
+        </div>
+        <button class="btn btn-primary" onclick="openCampaignModal()">＋ New Campaign</button>
+      </div>
+    </div>
+    <div id="campaigns-list" style="display:grid;gap:12px;"></div>
+  </div>
+
+  <!-- ── SIP Trunks Page ── -->
+  <div id="page-sip-trunks" class="page">
+    <div class="page-header">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div>
+          <div class="page-title">🔌 SIP Trunks</div>
+          <div class="page-sub">Configure SIP trunks for masked outbound calling</div>
+        </div>
+        <button class="btn btn-primary" onclick="openSipTrunkModal()">＋ Add SIP Trunk</button>
+      </div>
+    </div>
+    <div id="sip-trunks-list" style="display:grid;gap:12px;"></div>
   </div>
 
   <!-- ── Demo Links Page ── -->
@@ -1871,6 +1965,104 @@ async function stopBulkCampaign() {{
   if (!activeBulkJobId) return;
   await fetch('/api/call/bulk/'+activeBulkJobId+'/stop',{{method:'POST'}});
   clearInterval(bulkPollTimer);
+}}
+
+// ── Campaigns ─────────────────────────────────────────────────────────────────
+async function loadCampaigns() {{
+  const el = document.getElementById('campaigns-list'); if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);padding:20px;">Loading...</div>';
+  const data = await fetch('/api/campaigns').then(r=>r.json()).catch(()=>({{campaigns:[]}}));
+  const campaigns = data.campaigns || [];
+  if (!campaigns.length) {{
+    el.innerHTML = '<div class="section-card" style="color:var(--muted)">No campaigns yet. Click "+ New Campaign" to create one.</div>';
+    return;
+  }}
+  el.innerHTML = campaigns.map(c => `
+    <div class="section-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-weight:700;font-size:15px;">📋 ${{c.name}}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px;">Status: ${{c.status}} · Max concurrent: ${{c.max_concurrent_calls}}</div>
+          ${{c.notes ? `<div style="font-size:12px;color:var(--muted)">Notes: ${{c.notes}}</div>` : ''}}
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-ghost" onclick="updateCampaignStatus(${{c.id}},'running')">▶ Run</button>
+          <button class="btn btn-ghost" onclick="updateCampaignStatus(${{c.id}},'paused')">⏸</button>
+          <button class="btn btn-ghost" onclick="updateCampaignStatus(${{c.id}},'completed')" style="color:var(--muted)">✅ Done</button>
+        </div>
+      </div>
+      <div style="margin-top:10px;font-size:12px;color:var(--muted);">
+        <strong>Phone numbers:</strong><br>
+        <span style="white-space:pre-wrap">${{c.phone_numbers?.substring(0,200)}}</span>
+      </div>
+    </div>
+  `).join('');
+}}
+
+async function updateCampaignStatus(id, status) {{
+  await fetch('/api/campaigns/'+id, {{method:'PATCH', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{status}})}});
+  loadCampaigns();
+}}
+
+function openCampaignModal() {{
+  const name = prompt('Campaign name:');
+  if (!name) return;
+  const phones = prompt('Phone numbers (one per line, E.164 format):');
+  if (!phones) return;
+  const maxConc = prompt('Max concurrent calls:', '5') || '5';
+  const notes = prompt('Notes (optional):') || '';
+  fetch('/api/campaigns', {{
+    method:'POST',
+    headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{name, phone_numbers:phones, max_concurrent_calls:parseInt(maxConc), notes}})
+  }}).then(r=>r.json()).then(()=>{{ alert('✅ Campaign created!'); loadCampaigns(); }}).catch(()=>alert('❌ Failed to create campaign'));
+}}
+
+// ── SIP Trunks ────────────────────────────────────────────────────────────────
+async function loadSipTrunks() {{
+  const el = document.getElementById('sip-trunks-list'); if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);padding:20px;">Loading...</div>';
+  const data = await fetch('/api/sip-trunks').then(r=>r.json()).catch(()=>({{trunks:[]}}));
+  const trunks = data.trunks || [];
+  if (!trunks.length) {{
+    el.innerHTML = '<div class="section-card" style="color:var(--muted)">No SIP trunks yet. Click "+ Add SIP Trunk" to configure one.</div>';
+    return;
+  }}
+  el.innerHTML = trunks.map(t => `
+    <div class="section-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-weight:700;font-size:15px;">🔌 ${{t.name}}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px;">Provider: ${{t.provider}} · Caller ID: ${{t.caller_id_number || 'N/A'}}</div>
+          <div style="font-size:12px;color:var(--muted);">SIP URI: ${{t.sip_uri}}</div>
+        </div>
+        <button class="btn btn-ghost" onclick="deleteSipTrunk(${{t.id}})" style="color:#f87171;">🗑 Remove</button>
+      </div>
+    </div>
+  `).join('');
+}}
+
+async function deleteSipTrunk(id) {{
+  if (!confirm('Remove this SIP trunk?')) return;
+  await fetch('/api/sip-trunks/'+id, {{method:'DELETE'}});
+  loadSipTrunks();
+}}
+
+function openSipTrunkModal() {{
+  const name = prompt('Trunk name (e.g., "Vobiz Primary"):');
+  if (!name) return;
+  const provider = prompt('Provider (e.g., twilio, exotel, vobiz):');
+  if (!provider) return;
+  const sip_uri = prompt('SIP URI (e.g., sip:user@sip.provider.com):');
+  if (!sip_uri) return;
+  const caller_id_number = prompt('Caller ID / Masked Number (E.164 e.g. +919XXXXXXXX):') || '';
+  const username = prompt('SIP Username (optional):') || '';
+  const password = prompt('SIP Password (optional):') || '';
+  fetch('/api/sip-trunks', {{
+    method:'POST',
+    headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{name, provider, sip_uri, caller_id_number, username, password}})
+  }}).then(r=>r.json()).then(()=>{{ alert('✅ SIP Trunk added!'); loadSipTrunks(); }}).catch(()=>alert('❌ Failed to add SIP trunk'));
 }}
 
 // ── Demo Links ────────────────────────────────────────────────────────────────
