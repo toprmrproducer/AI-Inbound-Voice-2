@@ -2237,14 +2237,17 @@ async function loadAgentConfigs() {{
       return;
     }}
     const colors = {{insurance:'#a855f7',inquiry:'#3b82f6',hr:'#22c55e',appointment:'#eab308',survey:'#ec4899',custom:'#64748b'}};
+    // Store config objects in a map keyed by ID — never inject JSON into onclick attributes
+    window._configMap = {{}};
+    configs.forEach(c => {{ window._configMap[c.id] = c; }});
     el.innerHTML = configs.map(c => `<div style="border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:10px;background:var(--card);display:flex;justify-content:space-between;align-items:start;">
       <div>
         <div style="font-weight:600;font-size:14px;">${{c.name}} <span style="font-size:11px;padding:2px 7px;border-radius:20px;background:${{colors[c.preset_type]||'#888'}}22;color:${{colors[c.preset_type]||'#888'}}">${{c.preset_type||'custom'}}</span></div>
-        <div style="font-size:12px;color:var(--muted);margin-top:4px;">TTS: ${{c.tts_voice||'—'}} (${{c.tts_language||'—'}}) · LLM: ${{c.llm_model||'—'}} · Max: ${{c.max_call_duration_seconds||300}}s / ${{c.max_turns||25}} turns</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:4px;">TTS: ${{c.tts_voice||'N/A'}} (${{c.tts_language||'N/A'}}) · LLM: ${{c.llm_model||'N/A'}} · Max: ${{c.max_call_duration_seconds||300}}s / ${{c.max_turns||25}} turns</div>
         <div style="font-size:12px;color:var(--muted);margin-top:2px;max-width:500px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${{c.first_line||'No first line set'}}</div>
       </div>
       <div style="display:flex;gap:8px;margin-top:4px;">
-        <button onclick="showConfigForm(${{JSON.stringify(JSON.stringify(c))}})" style="background:none;border:none;cursor:pointer;color:var(--muted);">✏️</button>
+        <button onclick="showConfigForm('${{c.id}}')" style="background:none;border:none;cursor:pointer;color:var(--muted);">✏️</button>
         <button onclick="deleteConfig('${{c.id}}')" style="background:none;border:none;color:#ef4444;cursor:pointer;">🗑</button>
       </div>
     </div>`).join('');
@@ -2258,12 +2261,10 @@ async function createFromPreset(type) {{
   }} catch(e) {{ alert('Error: '+e.message); }}
 }}
 
-function showConfigForm(cfgJsonStr) {{
+function showConfigForm(cfgId) {{
   _editConfigId = null;
-  let c = {{}};
-  if (cfgJsonStr) {{
-    try {{ c = JSON.parse(cfgJsonStr); _editConfigId = c.id; }} catch(e) {{}}
-  }}
+  var c = window._configMap[cfgId] || {{}};
+  if (cfgId) _editConfigId = cfgId;
   document.getElementById('config-modal-title').textContent = _editConfigId ? 'Edit Agent Preset' : 'New Agent Preset';
   document.getElementById('cfg-name').value = c.name || '';
   document.getElementById('cfg-type').value = c.preset_type || 'custom';
@@ -2432,7 +2433,7 @@ async function loadLeads() {{
 }}
 
 async function addSingleLead() {{
-  const phone = document.getElementById('lead-phone').value.trim();
+  const phone = (document.getElementById('lead-phone').value.trim());
   if (!phone || !_activeCampaignId) return;
   const name = document.getElementById('lead-name').value.trim();
   await fetch('/api/telephony/campaigns/'+_activeCampaignId+'/leads', {{
@@ -2736,6 +2737,8 @@ async function loadAgents() {{
   g.innerHTML = '<div style="color:var(--muted);padding:20px;">Loading...</div>';
   const agents = await fetch('/api/agents').then(r=>r.json()).catch(()=>[]);
   if (!agents.length) {{ g.innerHTML='<div style="color:var(--muted);padding:20px;">No agents yet.</div>'; return; }}
+  window._agentMap = {{}};
+  agents.forEach(a => {{ window._agentMap[a.id] = a; }});
   g.innerHTML = agents.map(a=>`
     <div class="agent-card${{a.active?' active':''}}">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
@@ -2747,7 +2750,7 @@ async function loadAgents() {{
       </div>
       <div style="display:flex;gap:8px;">
         ${{!a.active?`<button class="btn btn-primary btn-sm" onclick="activateAgent('${{a.id}}')">▶ Activate</button>`:''}}
-        <button class="btn btn-ghost btn-sm" onclick='editAgent(${{JSON.stringify(a)}})'>✏ Edit</button>
+        <button class="btn btn-ghost btn-sm" onclick="editAgent('${{a.id}}')">✏ Edit</button>
         ${{a.id!=='default'?`<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="deleteAgent('${{a.id}}')">🗑</button>`:''}}
       </div>
     </div>`).join('');
@@ -2758,8 +2761,9 @@ async function deleteAgent(id) {{
   if (!confirm('Delete this agent?')) return;
   await fetch('/api/agents/'+id,{{method:'DELETE'}}); loadAgents();
 }}
-function editAgent(agent) {{
-  editingAgentId = agent.id;
+function editAgent(agentId) {{
+  var agent = (window._agentMap && window._agentMap[agentId]) || {{}};
+  editingAgentId = agentId;
   ['am-name','am-tts-lang','am-voice','am-llm','am-first-line','am-instructions'].forEach(id => {{
     const el=document.getElementById(id); if(!el) return;
     const key = {{
