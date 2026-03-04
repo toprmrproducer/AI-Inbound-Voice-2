@@ -685,19 +685,25 @@ async def run_demo_session(ctx: JobContext):
         if getattr(ev, "transcript", "") and len(ev.transcript) > 2:
             session.interrupt()
 
-    # Wait for a browser participant to actually join before starting the session
-    # so the agent's STT properly subscribes to their mic track
-    try:
-        logger.info("[DEMO] Waiting for browser participant to join room...")
-        await asyncio.wait_for(ctx.wait_for_participant(), timeout=60.0)
-        logger.info("[DEMO] Browser participant joined, starting session")
-    except asyncio.TimeoutError:
-        logger.warning("[DEMO] No participant joined within 60s, starting anyway")
+    # Find visitor participant — check existing first, then wait for them
+    visitor = None
+    for p in ctx.room.remote_participants.values():
+        if p.identity.startswith("visitor-"):
+            visitor = p
+            break
+    if visitor is None:
+        try:
+            logger.info("[DEMO] Waiting for browser participant to join room...")
+            visitor = await asyncio.wait_for(ctx.wait_for_participant(), timeout=60.0)
+            logger.info(f"[DEMO] Browser participant joined: {visitor.identity}")
+        except asyncio.TimeoutError:
+            logger.warning("[DEMO] No participant joined within 60s, starting anyway")
 
     # Give agent a reference to session so it can swap TTS on detection
     agent._session_ref = session
 
-    await session.start(room=ctx.room, agent=agent)
+    # Pass explicit participant so STT subscribes to their mic track, not a SIP trunk
+    await session.start(room=ctx.room, agent=agent, participant=visitor)
 
     logger.info("[DEMO] Session live.")
 

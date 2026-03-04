@@ -67,6 +67,17 @@ def init_db():
                 ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_day_of_week TEXT;
                 ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS interrupt_count INTEGER DEFAULT 0;
                 ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS caller_name TEXT;
+                -- Safe migrations: sip_trunks (table may exist without new columns)
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS sip_uri TEXT;
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS username TEXT;
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS password TEXT;
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS caller_id_number TEXT;
+                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+                -- Safe migrations: campaigns
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS phone_numbers TEXT DEFAULT '';
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sip_trunk_id INTEGER;
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_concurrent_calls INTEGER DEFAULT 5;
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS notes TEXT;
                 CREATE INDEX IF NOT EXISTS idx_call_transcripts_room
                     ON call_transcripts (call_room_id);
                 CREATE INDEX IF NOT EXISTS idx_call_logs_phone
