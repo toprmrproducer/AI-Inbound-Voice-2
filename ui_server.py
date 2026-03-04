@@ -798,89 +798,79 @@ async def demo_page(slug: str):
 </body>
 </html>""")
 
-# ── Agent Management Endpoints ─────────────────────────────────────────────────
+import db
 
-def _load_agents():
-    agents = read_json_file(AGENTS_FILE, [])
-    if not agents:
-        # Seed with default agent from current config
-        cfg = read_config()
-        agents = [{
-            "id": "default",
-            "name": "Daisy — Med Spa (Default)",
-            "active": True,
-            "stt_language": cfg.get("stt_language", "hi-IN"),
-            "tts_language": cfg.get("tts_language", "hi-IN"),
-            "tts_voice": cfg.get("tts_voice", "rohan"),
-            "llm_model": cfg.get("llm_model", "gpt-4o-mini"),
-            "first_line": cfg.get("first_line", ""),
-            "agent_instructions": cfg.get("agent_instructions", ""),
-            "created_at": datetime.utcnow().isoformat()
-        }]
-        write_json_file(AGENTS_FILE, agents)
-    return agents
+# ── Agent Management Endpoints ─────────────────────────────────────────────────
 
 @app.get("/api/agents")
 async def api_agents_list():
-    return _load_agents()
+    agents = db.get_agents()
+    if not agents:
+        cfg = read_config()
+        db.create_agent(
+            agent_id="default",
+            name="Daisy — Med Spa (Default)",
+            stt_language=cfg.get("stt_language", "hi-IN"),
+            tts_language=cfg.get("tts_language", "hi-IN"),
+            tts_voice=cfg.get("tts_voice", "rohan"),
+            llm_model=cfg.get("llm_model", "gpt-4o-mini"),
+            first_line=cfg.get("first_line", ""),
+            agent_instructions=cfg.get("agent_instructions", "")
+        )
+        db.activate_agent("default")
+        agents = db.get_agents()
+    return agents
 
 @app.post("/api/agents")
 async def api_agents_create(request: Request):
     data = await request.json()
-    agents = _load_agents()
-    agent = {
-        "id": str(uuid.uuid4())[:8],
-        "name": data.get("name", "New Agent"),
-        "active": False,
-        "stt_language": data.get("stt_language", "hi-IN"),
-        "tts_language": data.get("tts_language", "hi-IN"),
-        "tts_voice": data.get("tts_voice", "rohan"),
-        "llm_model": data.get("llm_model", "gpt-4o-mini"),
-        "first_line": data.get("first_line", ""),
-        "agent_instructions": data.get("agent_instructions", ""),
-        "created_at": datetime.utcnow().isoformat()
-    }
-    agents.append(agent)
-    write_json_file(AGENTS_FILE, agents)
+    agent = db.create_agent(
+        agent_id=str(uuid.uuid4())[:8],
+        name=data.get("name", "New Agent"),
+        stt_language=data.get("stt_language", "hi-IN"),
+        tts_language=data.get("tts_language", "hi-IN"),
+        tts_voice=data.get("tts_voice", "rohan"),
+        llm_model=data.get("llm_model", "gpt-4o-mini"),
+        first_line=data.get("first_line", ""),
+        agent_instructions=data.get("agent_instructions", "")
+    )
     return agent
 
 @app.put("/api/agents/{agent_id}")
 async def api_agents_update(agent_id: str, request: Request):
     data = await request.json()
-    agents = _load_agents()
-    for a in agents:
-        if a["id"] == agent_id:
-            a.update({k: v for k, v in data.items() if k not in ("id", "created_at")})
-    write_json_file(AGENTS_FILE, agents)
+    ok = db.update_agent(agent_id, data)
+    if not ok:
+        raise HTTPException(400, "Update failed")
+    # If this is the active agent, push to config.json too
+    active = db.get_active_agent()
+    if active and active.get("id") == agent_id:
+        cfg = read_config()
+        cfg.update({k: v for k, v in active.items() if k not in ("id", "name", "is_active", "created_at")})
+        write_config(cfg)
     return {"status": "updated"}
 
 @app.delete("/api/agents/{agent_id}")
 async def api_agents_delete(agent_id: str):
-    agents = _load_agents()
-    agents = [a for a in agents if a["id"] != agent_id]
-    if not agents:
+    agents = db.get_agents()
+    if len(agents) <= 1:
         raise HTTPException(400, "Cannot delete the last agent")
-    write_json_file(AGENTS_FILE, agents)
+    ok = db.delete_agent(agent_id)
+    if not ok:
+        raise HTTPException(400, "Delete failed")
     return {"status": "deleted"}
 
 @app.post("/api/agents/{agent_id}/activate")
 async def api_agents_activate(agent_id: str):
-    agents = _load_agents()
-    target = next((a for a in agents if a["id"] == agent_id), None)
-    if not target:
-        raise HTTPException(404, "Agent not found")
-    for a in agents:
-        a["active"] = (a["id"] == agent_id)
-    write_json_file(AGENTS_FILE, agents)
-    # Push agent config to config.json
-    write_config({
-        "stt_language": target.get("stt_language", "hi-IN"),
-        "tts_language": target.get("tts_language", "hi-IN"),
-        "tts_voice": target.get("tts_voice", "rohan"),
-        "llm_model": target.get("llm_model", "gpt-4o-mini"),
-        "first_line": target.get("first_line", ""),
-        "agent_instructions": target.get("agent_instructions", ""),
-    })
+    ok = db.activate_agent(agent_id)
+    if not ok:
+        raise HTTPException(404, "Agent not found or activation failed")
+    target = db.get_active_agent()
+    if target:
+        # Push ALL agent config fields to config.json to ensure worker uses them
+        cfg = read_config()
+        cfg.update({k: v for k, v in target.items() if k not in ("id", "name", "is_active", "created_at")})
+        write_config(cfg)
     return {"status": "activated", "agent": target}
 
 # ── Main Dashboard HTML ────────────────────────────────────────────────────────

@@ -78,6 +78,19 @@ def init_db():
                 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sip_trunk_id INTEGER;
                 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_concurrent_calls INTEGER DEFAULT 5;
                 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS notes TEXT;
+                -- Safe migrations: agents
+                CREATE TABLE IF NOT EXISTS agents (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    is_active BOOLEAN DEFAULT FALSE,
+                    stt_language TEXT,
+                    tts_language TEXT,
+                    tts_voice TEXT,
+                    llm_model TEXT,
+                    first_line TEXT,
+                    agent_instructions TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
                 CREATE INDEX IF NOT EXISTS idx_call_transcripts_room
                     ON call_transcripts (call_room_id);
                 CREATE INDEX IF NOT EXISTS idx_call_logs_phone
@@ -161,6 +174,87 @@ def delete_sip_trunk(trunk_id: int) -> bool:
         logger.error(f"[DB] delete_sip_trunk failed: {e}")
         return False
 
+# ── Agents ────────────────────────────────────────────────────────────────────
+
+def get_agents() -> list:
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM agents ORDER BY created_at ASC")
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"[DB] get_agents failed: {e}")
+        return []
+
+def get_active_agent() -> dict:
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM agents WHERE is_active = TRUE LIMIT 1")
+                res = cur.fetchone()
+                return dict(res) if res else None
+    except Exception as e:
+        logger.error(f"[DB] get_active_agent failed: {e}")
+        return None
+
+def create_agent(agent_id, name, stt_language, tts_language, tts_voice, llm_model, first_line, agent_instructions) -> dict:
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    INSERT INTO agents (id, name, stt_language, tts_language, tts_voice, llm_model, first_line, agent_instructions)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (agent_id, name, stt_language, tts_language, tts_voice, llm_model, first_line, agent_instructions))
+                conn.commit()
+                return dict(cur.fetchone())
+    except Exception as e:
+        logger.error(f"[DB] create_agent failed: {e}")
+        return {}
+
+def update_agent(agent_id, data: dict) -> bool:
+    allowed_fields = ["name", "stt_language", "tts_language", "tts_voice", "llm_model", "first_line", "agent_instructions"]
+    updates = []
+    values = []
+    for k, v in data.items():
+        if k in allowed_fields:
+            updates.append(f"{k} = %s")
+            values.append(v)
+    if not updates:
+        return False
+    values.append(agent_id)
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE agents SET {', '.join(updates)} WHERE id = %s", tuple(values))
+                conn.commit()
+                return True
+    except Exception as e:
+        logger.error(f"[DB] update_agent failed: {e}")
+        return False
+
+def delete_agent(agent_id: str) -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM agents WHERE id = %s", (agent_id,))
+                conn.commit()
+                return True
+    except Exception as e:
+        logger.error(f"[DB] delete_agent failed: {e}")
+        return False
+
+def activate_agent(agent_id: str) -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE agents SET is_active = FALSE")
+                cur.execute("UPDATE agents SET is_active = TRUE WHERE id = %s", (agent_id,))
+                conn.commit()
+                return True
+    except Exception as e:
+        logger.error(f"[DB] activate_agent failed: {e}")
+        return False
 
 # ── Campaigns ─────────────────────────────────────────────────────────────────
 

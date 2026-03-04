@@ -190,6 +190,7 @@ def get_live_config(phone_number: str = None):
     if phone_number:
         clean = phone_number.replace("+", "").replace(" ", "")
         config_paths.append(f"configs/{clean}.json")
+    # 2) Fallback to flat files
     config_paths += ["configs/default.json", CONFIG_FILE]
     for path in config_paths:
         if os.path.exists(path):
@@ -199,6 +200,22 @@ def get_live_config(phone_number: str = None):
                 break
             except Exception as e:
                 logging.getLogger("agent").error(f"Failed to read {path}: {e}")
+
+    # 3) Fetch Active Agent from DB (overrides flat file)
+    try:
+        import db
+        active_agent = db.get_active_agent()
+        if active_agent:
+            # Map DB columns to config keys
+            if active_agent.get("agent_instructions"): config["agent_instructions"] = active_agent["agent_instructions"]
+            if active_agent.get("first_line"): config["first_line"] = active_agent["first_line"]
+            if active_agent.get("llm_model"): config["llm_model"] = active_agent["llm_model"]
+            if active_agent.get("tts_voice"): config["tts_voice"] = active_agent["tts_voice"]
+            if active_agent.get("tts_language"): config["tts_language"] = active_agent["tts_language"]
+            if active_agent.get("stt_language"): config["stt_language"] = active_agent["stt_language"]
+    except Exception as e:
+        logging.getLogger("agent").error(f"Failed to load active agent from DB: {e}")
+
     return {
         "agent_instructions": config.get("agent_instructions", ""),
         "stt_min_endpointing_delay": config.get("stt_min_endpointing_delay", 0.05),
