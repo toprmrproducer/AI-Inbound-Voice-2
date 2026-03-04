@@ -681,7 +681,7 @@ async def run_demo_session(ctx: JobContext):
             sample_rate=16000,
             flush_signal=True,
         ),
-        llm=openai.LLM(model=llm_model),
+        llm=openai.LLM(model=llm_model, temperature=0.75, max_tokens=60),
         tts=demo_tts,
         vad=vad,
         turn_detection="stt",
@@ -869,15 +869,19 @@ async def entrypoint(ctx: JobContext):
     if llm_provider == "groq":
         active_llm = openai.LLM.with_groq(
             model=llm_model or "llama-3.3-70b-versatile",
+            temperature=0.75,
+            max_tokens=60,
         )
     elif llm_provider == "claude":
         active_llm = openai.LLM(
             model="claude-haiku-3-5-latest",
             base_url="https://api.anthropic.com/v1/",
             api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+            temperature=0.75,
+            max_tokens=60,
         )
     else:
-        active_llm = openai.LLM(model=llm_model)
+        active_llm = openai.LLM(model=llm_model, temperature=0.75, max_tokens=60)
 
     # ── Build STT (#9/#20) ────────────────────────────────────────────────
     if stt_provider == "deepgram" and deepgram_plugin:
@@ -1012,21 +1016,33 @@ async def entrypoint(ctx: JobContext):
     except Exception as e:
         logger.warning(f"[RECORDING] Failed to start recording: {e}")
 
-    @session.on("agent_speech_started")
-    def _agent_speech_started(ev):
-        global agent_is_speaking
-        agent_is_speaking = True
-        logger.debug("[STATE] Agent speaking: True")
-
-    @session.on("agent_speech_finished")
-    def _agent_speech_finished(ev):
-        global agent_is_speaking
-        agent_is_speaking = False
-        logger.debug("[STATE] Agent speaking: False")
-
     # ── #29 Turn counter + auto-close ─────────────────────────────────────
     turn_count = 0
     MAX_TURNS = live_config.get("max_turns", 20)
+    import time
+    last_agent_speak_time = time.time()
+
+    async def silence_watchdog():
+        """If caller goes quiet for 12s and agent hasn't spoken, send a nudge."""
+        nonlocal last_agent_speak_time
+        while True:
+            await asyncio.sleep(3)
+            # Only trigger if the session is still active
+            if time.time() - last_agent_speak_time > 12:
+                logger.info("[WATCHDOG] 12s silence detected, sending nudge.")
+                await session.say("Are you still there? You can say 'ok' or ask another question.")
+                last_agent_speak_time = time.time()
+
+    watchdog_task = asyncio.create_task(silence_watchdog())
+
+    @session.on("agent_speech_started")
+    def _agent_speech_started(ev):
+        global agent_is_speaking
+        nonlocal last_agent_speak_time
+        agent_is_speaking = True
+        last_agent_speak_time = time.time()
+        logger.debug("[STATE] Agent speaking: True")
+
 
     # ── #30 Interrupt counter ─────────────────────────────────────────────
     interrupt_count = 0
@@ -1058,7 +1074,8 @@ async def entrypoint(ctx: JobContext):
             logger.debug(f"[FILTER-EMPTY] Dropped empty transcript")
             return
         if transcript_lower in FILLER_WORDS:
-            logger.debug(f"[FILTER-FILLER] Dropped filler: '{transcript}'")
+            logger.info(f"[FILTER-FILLER] Caught filler: '{transcript}'. Generating short filler reply to prevent silence.")
+            asyncio.create_task(session.generate_reply(instructions="Acknowledge the caller's phrase with a very short 'Yes', 'Okay', or 'I am listening.' Do not ask a question."))
             return
 
         logger.info(f"[TRANSCRIPT] Passing to LLM: '{transcript}'")
@@ -1069,15 +1086,19 @@ async def entrypoint(ctx: JobContext):
 
         # #29 — Auto-close on too many turns
         if turn_count >= MAX_TURNS:
-            logger.info(f"[LIMIT] {MAX_TURNS} turns reached — wrapping up")
-            asyncio.create_task(
-                session.generate_reply(
-                    instructions="Politely wrap up. Tell the user they can call back anytime. Say goodbye warmly."
-                )
-            )
+            logger.info(f"[LIMIT] {MAX_TURNS} turns reached — wrapping up and dropping call")
+            async def force_hangup():
+                await session.say("I need to wrap up our call now. Thank you, our team will follow up shortly. Goodbye!")
+                # Give TTS time to flush before disconnect
+                await asyncio.sleep(4)
+                await agent_tools.end_call()
+            asyncio.create_task(force_hangup())
 
     @session.on("agent_speech_committed")
     def on_agent_speech_committed(ev):
+        nonlocal last_agent_speak_time
+        last_agent_speak_time = time.time()
+
         # #33 — Stream agent transcript
         content = getattr(ev, 'agent_transcript', '') or getattr(ev, 'text', '')
         if content:
@@ -1096,6 +1117,7 @@ async def entrypoint(ctx: JobContext):
         # Set flag so transcript filter ignores any final flush
         global agent_is_speaking
         agent_is_speaking = False  # Clear any stuck state
+        watchdog_task.cancel()
         # Trigger graceful shutdown
         asyncio.create_task(unified_shutdown_hook(ctx))
 
