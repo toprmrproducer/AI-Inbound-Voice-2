@@ -237,6 +237,22 @@ load_dotenv()
 logger = logging.getLogger("outbound-agent")
 
 
+# ── Module-level helpers (always available, never crash jobs) ─────────────────
+
+async def safe_speak(session, text: str, **kwargs):
+    """
+    Wrapper around session.say() that catches Sarvam WebSocket / TTS errors
+    so the job never dies from a TTS failure.
+    """
+    if not text:
+        return
+    try:
+        await session.say(text, **kwargs)
+    except Exception as e:
+        logger.warning("[TTS] safe_speak swallowed error: %s", e)
+
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TOOL CONTEXT — All AI-callable functions
 # ══════════════════════════════════════════════════════════════════════════════
