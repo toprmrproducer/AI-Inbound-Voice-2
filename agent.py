@@ -450,13 +450,9 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
         super().__init__(instructions=final_instructions, tools=tools)
 
     async def on_enter(self):
-        # Fix 7: Use direct say() — skips LLM entirely, saves 1-2s startup latency
-        greeting = (
-            self._live_config.get("opening_greeting")
-            or self._first_line
-            or "Namaste! Welcome to Daisy's Med Spa. Main aapki kaise madad kar sakti hoon?"
-        )
-        await self.session.say(greeting, allow_interruptions=True)
+        # Greeting is sent from entrypoint after session.start() where session exists.
+        # on_enter() fires before self.session is set, so we cannot call self.session here.
+        pass
 
 
 
@@ -923,27 +919,25 @@ async def entrypoint(ctx: JobContext):
     if _room_input_opts is not None:
         _start_kwargs["room_input_options"] = _room_input_opts
     await session.start(**_start_kwargs)
-
-    # Fix 1: Non-blocking TTS prewarm AFTER session.start — fire and forget
-    async def _prewarm_tts():
-        try:
-            await asyncio.sleep(0.1)  # tiny yield so session fully initialises
-            if session.tts is not None and hasattr(session.tts, 'prewarm'):
-                await session.tts.prewarm()
-                logger.info("[TTS] Pre-warmed successfully")
-        except Exception as e:
-            logger.warning(f"[TTS] Pre-warm failed (non-critical): {e}")
-    asyncio.create_task(_prewarm_tts())
-
-    # Fix 9: Inject caller memory non-blocking
-    asyncio.create_task(_inject_caller_memory())
-
     logger.info("[AGENT] Session live — waiting for caller audio.")
     call_start_time = datetime.now()
 
-    async def upsert_active_call(status: str):
-        logger.info(f"[ACTIVE-CALL] {ctx.room.name} status={status}")
+    # Prewarm removed: Sarvam TTS has no prewarm() method — it was always failing silently.
+    # The first TTS connection is established on the first say() call instead.
+
+    # Fix 9: Inject caller memory non-blocking
+    asyncio.create_task(_inject_caller_memory())
     asyncio.create_task(upsert_active_call("active"))
+
+    # Fix 1+7: Send greeting directly from here — session is fully live, self.session is set.
+    # This replaces the broken on_enter() approach (self.session doesn't exist in on_enter).
+    _greeting = (
+        live_config.get("opening_greeting")
+        or first_line
+        or "Namaste! Welcome to Daisy's Med Spa. Main aapki kaise madad kar sakti hoon?"
+    )
+    logger.info(f"[GREETING] Sending: {_greeting[:60]}...")
+    asyncio.create_task(session.say(_greeting, allow_interruptions=True))
 
     # Fix 3: Recording — non-blocking, handles egress limit, always closes aiohttp session
     egress_id = None
