@@ -60,11 +60,14 @@ from livekit.agents import (
     Agent,
     AgentSession,
     JobContext,
-    RoomInputOptions,
     WorkerOptions,
     cli,
     llm,
 )
+try:
+    from livekit.agents import RoomInputOptions  # kept for compat, may be deprecated
+except ImportError:
+    RoomInputOptions = None
 try:
     from livekit.agents import noise_cancellation as _nc
 except ImportError:
@@ -447,19 +450,13 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
         super().__init__(instructions=final_instructions, tools=tools)
 
     async def on_enter(self):
-        # #28 — Dynamic greeting from config
+        # Fix 7: Use direct say() — skips LLM entirely, saves 1-2s startup latency
         greeting = (
             self._live_config.get("opening_greeting")
             or self._first_line
-            or (
-                "Namaste! Welcome to Daisy's Med Spa. "
-                "Main aapki kaise madad kar sakti hoon? "
-                "I can answer questions about our treatments or help you book an appointment."
-            )
+            or "Namaste! Welcome to Daisy's Med Spa. Main aapki kaise madad kar sakti hoon?"
         )
-        await self.session.generate_reply(
-            instructions=f"Say exactly this phrase: '{greeting}'"
-        )
+        await self.session.say(greeting, allow_interruptions=True)
 
 
 
@@ -692,6 +689,29 @@ async def entrypoint(ctx: JobContext):
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning(f"[METADATA] Parse error: {e} — treating as inbound")
 
+    # Fix 2: Extract phone from room name (inbound SIP pattern: _+91XXXXXXXX_RANDOMID)
+    if not phone_number:
+        room_match = re.search(r'[_/](\+?\d{10,15})[_/]', ctx.room.name)
+        if room_match:
+            phone_number = room_match.group(1)
+            logger.info(f"[PHONE] Extracted from room name: {phone_number}")
+
+    # Fix 2: Extract phone from SIP participant identity (inbound)
+    if not phone_number:
+        await asyncio.sleep(0.3)  # brief wait for SIP participants to register
+        for identity, participant in ctx.room.remote_participants.items():
+            clean_id = identity.lower().replace("sip_", "").replace("sip/", "").replace("sip+", "+")
+            if re.match(r'^\+?\d{10,15}$', clean_id):
+                phone_number = clean_id if clean_id.startswith('+') else f"+{clean_id}"
+                logger.info(f"[PHONE] Extracted from SIP identity '{identity}': {phone_number}")
+                break
+            if participant.name and re.search(r'\+?\d{10,15}', participant.name):
+                name_match = re.search(r'(\+?\d{10,15})', participant.name)
+                if name_match:
+                    phone_number = name_match.group(1)
+                    logger.info(f"[PHONE] Extracted from participant name: {phone_number}")
+                    break
+
     # ── Rate limiting (#37) ────────────────────────────────────────────────
     caller_phone = phone_number or "unknown"
     if is_rate_limited(caller_phone):
@@ -779,11 +799,17 @@ async def entrypoint(ctx: JobContext):
             logger.warning(f"[MEMORY] Could not load caller history: {e}")
         return ""
 
-    if caller_phone != "unknown":
-        caller_history = await get_caller_history(caller_phone)
-        if caller_history:
-            current = live_config.get("agent_instructions", "")
-            live_config["agent_instructions"] = current + caller_history
+    # Fix 9: Non-blocking caller memory — inject after session starts, doesn't delay startup
+    async def _inject_caller_memory():
+        if caller_phone == "unknown":
+            return
+        try:
+            history = await get_caller_history(caller_phone)
+            if history:
+                live_config["agent_instructions"] = live_config.get("agent_instructions", "") + history
+                logger.info(f"[MEMORY] Injected caller history for {caller_phone}")
+        except Exception as e:
+            logger.warning(f"[MEMORY] Failed: {e}")
 
     # ── Build LLM (#8/#27) ────────────────────────────────────────────────
     if llm_provider == "groq":
@@ -845,14 +871,15 @@ async def entrypoint(ctx: JobContext):
         sentences = re.split(r'(?<=[।.!?])\s+', agent_response.strip())
         return sentences[0] if sentences else agent_response
 
-    # ── Start Sarvam-powered session (#1 #2 #3 #6) ────────────────────────
-    _room_input_opts = RoomInputOptions(close_on_disconnect=False)
+    # ── Build room options (Fix 8: RoomInputOptions deprecated; handle both APIs) ──
+    _room_input_opts = None
     if _nc is not None:
         try:
-            _room_input_opts = RoomInputOptions(
-                close_on_disconnect=False,
-                noise_cancellation=_nc.BVC(),
-            )
+            if RoomInputOptions is not None:
+                _room_input_opts = RoomInputOptions(
+                    close_on_disconnect=False,
+                    noise_cancellation=_nc.BVC(),
+                )
             logger.info("[AUDIO] BVC noise cancellation enabled")
         except Exception as e:
             logger.warning(f"[AUDIO] BVC unavailable: {e}")
@@ -861,7 +888,7 @@ async def entrypoint(ctx: JobContext):
     from livekit.plugins import silero
     vad = silero.VAD.load(
         min_speech_duration=0.05,
-        min_silence_duration=0.8,
+        min_silence_duration=0.6,   # Fix 6: reduced 0.8→0.6s for snappier turn detection
         activation_threshold=0.55,
         deactivation_threshold=0.40,
         prefix_padding_duration=0.1,
@@ -891,59 +918,77 @@ async def entrypoint(ctx: JobContext):
             session.interrupt()
 
 
-    await session.start(
-        room=ctx.room,
-        agent=agent,
-        room_input_options=_room_input_opts,
-    )
+    # Fix 8: Use room_input_options kwarg if available, else omit (handles deprecated API)
+    _start_kwargs = dict(room=ctx.room, agent=agent)
+    if _room_input_opts is not None:
+        _start_kwargs["room_input_options"] = _room_input_opts
+    await session.start(**_start_kwargs)
 
-    # #12 — TTS pre-warming
-    try:
-        await session.tts.prewarm()
-        logger.info("[TTS] Pre-warmed successfully")
-    except Exception as e:
-        logger.warning(f"[TTS] Pre-warm failed (non-critical): {e}")
+    # Fix 1: Non-blocking TTS prewarm AFTER session.start — fire and forget
+    async def _prewarm_tts():
+        try:
+            await asyncio.sleep(0.1)  # tiny yield so session fully initialises
+            if session.tts is not None and hasattr(session.tts, 'prewarm'):
+                await session.tts.prewarm()
+                logger.info("[TTS] Pre-warmed successfully")
+        except Exception as e:
+            logger.warning(f"[TTS] Pre-warm failed (non-critical): {e}")
+    asyncio.create_task(_prewarm_tts())
+
+    # Fix 9: Inject caller memory non-blocking
+    asyncio.create_task(_inject_caller_memory())
 
     logger.info("[AGENT] Session live — waiting for caller audio.")
     call_start_time = datetime.now()
 
-    # #38 — Track active call (in-memory log; no separate DB table needed)
     async def upsert_active_call(status: str):
         logger.info(f"[ACTIVE-CALL] {ctx.room.name} status={status}")
     asyncio.create_task(upsert_active_call("active"))
 
-    # ── Start call recording → Cloudflare R2 (via LiveKit egress) ─────────────
-    # Requires: R2_ACCESS_KEY, R2_SECRET_KEY, R2_ENDPOINT, R2_BUCKET in env.
+    # Fix 3: Recording — non-blocking, handles egress limit, always closes aiohttp session
     egress_id = None
-    try:
-        rec_api = api.LiveKitAPI(
-            url=os.environ["LIVEKIT_URL"],
-            api_key=os.environ["LIVEKIT_API_KEY"],
-            api_secret=os.environ["LIVEKIT_API_SECRET"],
-        )
-        egress_resp = await rec_api.egress.start_room_composite_egress(
-            api.RoomCompositeEgressRequest(
-                room_name=ctx.room.name,
-                audio_only=True,
-                file_outputs=[api.EncodedFileOutput(
-                    file_type=api.EncodedFileType.OGG,
-                    filepath=f"recordings/{ctx.room.name}.ogg",
-                    s3=api.S3Upload(
-                        access_key=os.environ.get("R2_ACCESS_KEY", ""),
-                        secret=os.environ.get("R2_SECRET_KEY", ""),
-                        bucket=os.environ.get("R2_BUCKET", "call-recordings"),
-                        region="auto",
-                        endpoint=os.environ.get("R2_ENDPOINT", ""),
-                        force_path_style=False,
-                    )
-                )]
+    async def _start_recording():
+        nonlocal egress_id
+        rec_api = None
+        try:
+            rec_api = api.LiveKitAPI(
+                url=os.environ["LIVEKIT_URL"],
+                api_key=os.environ["LIVEKIT_API_KEY"],
+                api_secret=os.environ["LIVEKIT_API_SECRET"],
             )
-        )
-        egress_id = egress_resp.egress_id
-        await rec_api.aclose()
-        logger.info(f"[RECORDING] Started egress: {egress_id}")
-    except Exception as e:
-        logger.warning(f"[RECORDING] Failed to start recording: {e}")
+            egress_resp = await rec_api.egress.start_room_composite_egress(
+                api.RoomCompositeEgressRequest(
+                    room_name=ctx.room.name,
+                    audio_only=True,
+                    file_outputs=[api.EncodedFileOutput(
+                        file_type=api.EncodedFileType.OGG,
+                        filepath=f"recordings/{ctx.room.name}.ogg",
+                        s3=api.S3Upload(
+                            access_key=os.environ.get("R2_ACCESS_KEY", ""),
+                            secret=os.environ.get("R2_SECRET_KEY", ""),
+                            bucket=os.environ.get("R2_BUCKET", "call-recordings"),
+                            region="auto",
+                            endpoint=os.environ.get("R2_ENDPOINT", ""),
+                            force_path_style=False,
+                        )
+                    )]
+                )
+            )
+            egress_id = egress_resp.egress_id
+            logger.info(f"[RECORDING] Started egress: {egress_id}")
+        except Exception as e:
+            err = str(e).lower()
+            if "resource_exhausted" in err or "limit" in err or "egress" in err:
+                logger.warning("[RECORDING] Skipped — LiveKit egress limit reached (upgrade plan or disable recording)")
+            else:
+                logger.warning(f"[RECORDING] Failed: {e}")
+        finally:
+            if rec_api is not None:
+                try:
+                    await rec_api.aclose()  # CRITICAL: always close to avoid unclosed session warnings
+                except Exception:
+                    pass
+    asyncio.create_task(_start_recording())
 
     @session.on("agent_speech_started")
     def _agent_speech_started(ev):
