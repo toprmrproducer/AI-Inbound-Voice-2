@@ -615,6 +615,7 @@ class AutoLanguageAgent(Agent):
                             model="bulbul:v3",
                             speaker=cfg["speaker"],
                             target_language_code=cfg["tts_lang"],
+                            api_key=os.environ.get("SARVAM_API_KEY", ""),
                         )
                         logger.info("[LANG] TTS swapped to %s (speaker=%s)", cfg['name'], cfg['speaker'])
                     except Exception as e:
@@ -671,6 +672,7 @@ async def run_demo_session(ctx: JobContext):
             target_language_code="hi-IN",
             enable_preprocessing=True,
             pace=0.95,
+            api_key=os.environ.get("SARVAM_API_KEY") or live_config.get("sarvam_api_key", ""),
         )
 
     session = AgentSession(
@@ -681,6 +683,7 @@ async def run_demo_session(ctx: JobContext):
             high_vad_sensitivity=True,
             sample_rate=16000,
             flush_signal=True,
+            api_key=os.environ.get("SARVAM_API_KEY") or live_config.get("sarvam_api_key", ""),
         ),
         llm=openai.LLM(model=llm_model, temperature=0.75),
         tts=demo_tts,
@@ -909,6 +912,7 @@ async def entrypoint(ctx: JobContext):
             high_vad_sensitivity=True,
             sample_rate=16000,
             flush_signal=True,
+            api_key=os.environ.get("SARVAM_API_KEY") or live_config.get("sarvam_api_key", ""),
         )
 
     # ── Build TTS (#10) ───────────────────────────────────────────────────
@@ -924,6 +928,7 @@ async def entrypoint(ctx: JobContext):
             speaker=tts_voice,
             enable_preprocessing=True,
             pace=0.95,
+            api_key=os.environ.get("SARVAM_API_KEY") or live_config.get("sarvam_api_key", ""),
         )
 
     # ── Build agent ───────────────────────────────────────────────────────
