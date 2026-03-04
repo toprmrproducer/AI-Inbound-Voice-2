@@ -681,7 +681,7 @@ async def run_demo_session(ctx: JobContext):
             sample_rate=16000,
             flush_signal=True,
         ),
-        llm=openai.LLM(model=llm_model, temperature=0.75, max_tokens=60),
+        llm=openai.LLM(model=llm_model, temperature=0.75),
         tts=demo_tts,
         vad=vad,
         turn_detection="stt",
@@ -870,7 +870,6 @@ async def entrypoint(ctx: JobContext):
         active_llm = openai.LLM.with_groq(
             model=llm_model or "llama-3.3-70b-versatile",
             temperature=0.75,
-            max_tokens=60,
         )
     elif llm_provider == "claude":
         active_llm = openai.LLM(
@@ -878,10 +877,9 @@ async def entrypoint(ctx: JobContext):
             base_url="https://api.anthropic.com/v1/",
             api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
             temperature=0.75,
-            max_tokens=60,
         )
     else:
-        active_llm = openai.LLM(model=llm_model, temperature=0.75, max_tokens=60)
+        active_llm = openai.LLM(model=llm_model, temperature=0.75)
 
     # ── Build STT (#9/#20) ────────────────────────────────────────────────
     if stt_provider == "deepgram" and deepgram_plugin:

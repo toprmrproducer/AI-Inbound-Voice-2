@@ -827,7 +827,7 @@ async def api_agents_create(request: Request):
     data = await request.json()
     try:
         agent = db.create_agent(
-            agent_id=str(uuid.uuid4())[:8],
+            agent_id=str(uuid.uuid4()),
             name=data.get("name", "New Agent"),
             stt_language=data.get("stt_language", "hi-IN"),
             tts_language=data.get("tts_language", "hi-IN"),
@@ -1321,6 +1321,40 @@ async def get_dashboard():
         <div class="hint">Seconds the AI waits after silence before responding. Default: 0.6</div>
       </div>
     </div>
+    <div class="section-card">
+      <div class="section-title">Voice Synthesis (Sarvam bulbul:v3)</div>
+      <div class="form-row" style="max-width:720px;">
+        <div class="form-group">
+          <label>Speaker Voice</label>
+          <select id="tts_voice">
+            <option value="kavya" {sel('tts_voice','kavya')}>Kavya — Female, Friendly</option>
+            <option value="rohan" {sel('tts_voice','rohan')}>Rohan — Male, Balanced</option>
+            <option value="priya" {sel('tts_voice','priya')}>Priya — Female, Warm</option>
+            <option value="shubh" {sel('tts_voice','shubh')}>Shubh — Male, Formal</option>
+            <option value="shreya" {sel('tts_voice','shreya')}>Shreya — Female, Clear</option>
+            <option value="ritu" {sel('tts_voice','ritu')}>Ritu — Female, Soft</option>
+            <option value="rahul" {sel('tts_voice','rahul')}>Rahul — Male, Deep</option>
+            <option value="amit" {sel('tts_voice','amit')}>Amit — Male, Casual</option>
+            <option value="neha" {sel('tts_voice','neha')}>Neha — Female, Energetic</option>
+            <option value="dev" {sel('tts_voice','dev')}>Dev — Male, Professional</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Language</label>
+          <select id="tts_language">
+            <option value="hi-IN" {sel('tts_language','hi-IN')}>Hindi (hi-IN)</option>
+            <option value="en-IN" {sel('tts_language','en-IN')}>English India (en-IN)</option>
+            <option value="ta-IN" {sel('tts_language','ta-IN')}>Tamil (ta-IN)</option>
+            <option value="te-IN" {sel('tts_language','te-IN')}>Telugu (te-IN)</option>
+            <option value="kn-IN" {sel('tts_language','kn-IN')}>Kannada (kn-IN)</option>
+            <option value="ml-IN" {sel('tts_language','ml-IN')}>Malayalam (ml-IN)</option>
+            <option value="mr-IN" {sel('tts_language','mr-IN')}>Marathi (mr-IN)</option>
+            <option value="gu-IN" {sel('tts_language','gu-IN')}>Gujarati (gu-IN)</option>
+            <option value="bn-IN" {sel('tts_language','bn-IN')}>Bengali (bn-IN)</option>
+          </select>
+        </div>
+      </div>
+    </div>
     <div class="save-bar">
       <span class="save-status" id="save-status-agent">✅ Saved!</span>
       <button class="btn btn-primary" onclick="saveConfig('agent')">💾 Save Agent Settings</button>
@@ -1367,40 +1401,7 @@ async def get_dashboard():
         </select>
       </div>
     </div>
-    <div class="section-card">
-      <div class="section-title">Voice Synthesis (Sarvam bulbul:v3)</div>
-      <div class="form-row" style="max-width:720px;">
-        <div class="form-group">
-          <label>Speaker Voice</label>
-          <select id="tts_voice">
-            <option value="kavya" {sel('tts_voice','kavya')}>Kavya — Female, Friendly</option>
-            <option value="rohan" {sel('tts_voice','rohan')}>Rohan — Male, Balanced</option>
-            <option value="priya" {sel('tts_voice','priya')}>Priya — Female, Warm</option>
-            <option value="shubh" {sel('tts_voice','shubh')}>Shubh — Male, Formal</option>
-            <option value="shreya" {sel('tts_voice','shreya')}>Shreya — Female, Clear</option>
-            <option value="ritu" {sel('tts_voice','ritu')}>Ritu — Female, Soft</option>
-            <option value="rahul" {sel('tts_voice','rahul')}>Rahul — Male, Deep</option>
-            <option value="amit" {sel('tts_voice','amit')}>Amit — Male, Casual</option>
-            <option value="neha" {sel('tts_voice','neha')}>Neha — Female, Energetic</option>
-            <option value="dev" {sel('tts_voice','dev')}>Dev — Male, Professional</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Language</label>
-          <select id="tts_language">
-            <option value="hi-IN" {sel('tts_language','hi-IN')}>Hindi (hi-IN)</option>
-            <option value="en-IN" {sel('tts_language','en-IN')}>English India (en-IN)</option>
-            <option value="ta-IN" {sel('tts_language','ta-IN')}>Tamil (ta-IN)</option>
-            <option value="te-IN" {sel('tts_language','te-IN')}>Telugu (te-IN)</option>
-            <option value="kn-IN" {sel('tts_language','kn-IN')}>Kannada (kn-IN)</option>
-            <option value="ml-IN" {sel('tts_language','ml-IN')}>Malayalam (ml-IN)</option>
-            <option value="mr-IN" {sel('tts_language','mr-IN')}>Marathi (mr-IN)</option>
-            <option value="gu-IN" {sel('tts_language','gu-IN')}>Gujarati (gu-IN)</option>
-            <option value="bn-IN" {sel('tts_language','bn-IN')}>Bengali (bn-IN)</option>
-          </select>
-        </div>
-      </div>
-    </div>
+    <!-- Voice Synthesis moved to Agent Settings -->
     <div class="save-bar">
       <span class="save-status" id="save-status-models">✅ Saved!</span>
       <button class="btn btn-primary" onclick="saveConfig('models')">💾 Save Model Settings</button>
@@ -1946,13 +1947,13 @@ async function saveConfig(section) {{
       first_line: get('first_line'),
       agent_instructions: get('agent_instructions'),
       stt_min_endpointing_delay: parseFloat(get('stt_min_endpointing_delay')),
+      tts_voice: get('tts_voice'),
+      tts_language: get('tts_language'),
+      stt_language: get('tts_language') || 'hi-IN',
     }});
   }} else if (section === 'models') {{
     Object.assign(payload, {{
       llm_model: get('llm_model'),
-      tts_voice: get('tts_voice'),
-      tts_language: get('tts_language'),
-      stt_language: get('tts_language') || 'hi-IN',
     }});
   }} else if (section === 'credentials') {{
     Object.assign(payload, {{

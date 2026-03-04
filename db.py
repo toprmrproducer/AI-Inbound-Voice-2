@@ -42,6 +42,18 @@ def init_db():
                     content TEXT,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
+                CREATE TABLE IF NOT EXISTS agents (
+                    id UUID PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    is_active BOOLEAN DEFAULT FALSE,
+                    stt_language TEXT,
+                    tts_language TEXT,
+                    tts_voice TEXT,
+                    llm_model TEXT,
+                    first_line TEXT,
+                    agent_instructions TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
                 CREATE TABLE IF NOT EXISTS demo_links (
                     id SERIAL PRIMARY KEY,
                     slug TEXT UNIQUE NOT NULL,
@@ -78,21 +90,6 @@ def init_db():
                 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sip_trunk_id INTEGER;
                 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_concurrent_calls INTEGER DEFAULT 5;
                 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS notes TEXT;
-                -- Safe migrations: agents
-                CREATE TABLE IF NOT EXISTS agents (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    is_active BOOLEAN DEFAULT FALSE,
-                    stt_language TEXT,
-                    tts_language TEXT,
-                    tts_voice TEXT,
-                    llm_model TEXT,
-                    first_line TEXT,
-                    agent_instructions TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
-                CREATE INDEX IF NOT EXISTS idx_call_transcripts_room
-                    ON call_transcripts (call_room_id);
                 CREATE INDEX IF NOT EXISTS idx_call_logs_phone
                     ON call_logs (phone);
                 CREATE INDEX IF NOT EXISTS idx_call_logs_created
