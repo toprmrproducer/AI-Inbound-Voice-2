@@ -789,7 +789,16 @@ async def entrypoint(ctx: JobContext):
                 api_secret=os.environ["LIVEKIT_API_SECRET"],
             )
             
-            sip_trunk_id = os.environ.get("OUTBOUND_TRUNK_ID", os.environ.get("SIP_TRUNK_ID", ""))
+            sip_trunk_id = (
+                os.environ.get("OUTBOUND_TRUNK_ID") 
+                or os.environ.get("SIP_TRUNK_ID") 
+                or config.get("sip_trunk_id", "")
+            )
+            
+            if not sip_trunk_id:
+                logger.error("[SIP] Missing SIP Trunk ID. Set OUTBOUND_TRUNK_ID or SIP_TRUNK_ID in environment.")
+                notify_agent_error(phone_number or "unknown", "Missing SIP trunk ID in environment variables. Set OUTBOUND_TRUNK_ID.")
+                return
             
             await lk_api.sip.create_sip_participant(
                 api.CreateSIPParticipantRequest(
