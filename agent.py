@@ -170,13 +170,13 @@ Even if the user mixes languages, ALWAYS reply in {lang_name}.
 """
 
     core = f"""
-
-═══════════════════════════════════════════{language_rule}
-CRITICAL RESPONSE FORMAT FOR VOICE:
-- NEVER generate more than ONE sentence at a time
-- Each response must be maximum 15 words
-- Do NOT use compound sentences joined by "and" or "but"
-- Short sentences = faster interruption for the user
+STYLE & TONE:
+- Speak like a friendly human, not a bot.
+- Use natural short fillers like "umm", "hmm", "acha", "theek hai", "ok" where it feels natural.
+- Use fillers sparingly: at most one filler per response.
+- Keep responses short: max 2 sentences, 4–18 words per sentence.
+- Use contractions and casual Hinglish/Tamil/English depending on caller language.
+- Never say you are an AI or a bot.
 ═══════════════════════════════════════════
 
 """
@@ -251,15 +251,83 @@ logger = logging.getLogger("outbound-agent")
 
 # ── Module-level helpers (always available, never crash jobs) ─────────────────
 
+import random
+import re
+
+class AgentAudioSession:
+    def __init__(self, tts=None, session=None):
+        self.tts = tts
+        self.session = session
+        self._speaking = False
+
+    @property
+    def is_speaking(self) -> bool:
+        return self._speaking
+
+    async def speak(self, text: str, **kwargs):
+        if not text:
+            return
+        self._speaking = True
+        try:
+            if self.session:
+                await self.session.say(text, **kwargs)
+            elif self.tts:
+                await self.tts.speak(text, **kwargs)
+        except Exception as e:
+            logger.warning("[TTS] AudioSession swallowed error: %s", e)
+        finally:
+            self._speaking = False
+
+    async def stop(self):
+        try:
+            if self.session:
+                self.session.interrupt()
+            elif self.tts:
+                await self.tts.stop()
+        except Exception:
+            pass
+        self._speaking = False
+
+FILLERS_START = ["Umm,", "Acha,", "Dekhiye,", "Hmm,"]
+
+def maybe_add_starter(text: str) -> str:
+    if len(text.split()) < 8:
+        return text
+    if random.random() < 0.45:
+        filler = random.choice(FILLERS_START)
+        return f"{filler} {text}"
+    return text
+
+def soften_questions(text: str) -> str:
+    return re.sub(r"\?", "...?", text)
+
+def shorten_long_sentences(text: str) -> str:
+    if len(text.split()) > 22:
+        text = text.replace(" and ", ". And ")
+    return text
+
+def humanize_text(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return text
+    text = shorten_long_sentences(text)
+    text = soften_questions(text)
+    text = maybe_add_starter(text)
+    return text
+
 async def safe_speak(session, text: str, **kwargs):
     """
-    Wrapper around session.say() that catches Sarvam WebSocket / TTS errors
-    so the job never dies from a TTS failure.
+    Wrapper around session.say() or AgentAudioSession that catches Sarvam WebSocket errors
+    so the job never dies from a TTS failure, and humanizes text before saying it.
     """
+    text = humanize_text(text)
     if not text:
         return
     try:
-        await session.say(text, **kwargs)
+        if isinstance(session, AgentAudioSession):
+            await session.speak(text, **kwargs)
+        else:
+            await session.say(text, **kwargs)
     except Exception as e:
         logger.warning("[TTS] safe_speak swallowed error: %s", e)
 
@@ -502,9 +570,8 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
                 "I can answer questions about our treatments or help you book an appointment."
             )
         )
-        await self.session.generate_reply(
-            instructions=f"Say exactly this phrase: '{greeting}'"
-        )
+        audio_session = AgentAudioSession(session=self.session)
+        await safe_speak(audio_session, greeting, allow_interruptions=True)
 
 
 
@@ -616,7 +683,15 @@ async def run_demo_session(ctx: JobContext):
         )
 
     session = AgentSession(
-        stt=sarvam.STT(model="saaras:v3", language="unknown", mode="transcribe"),
+        stt=sarvam.STT(
+            model="saaras:v3", 
+            language="unknown", 
+            mode="transcribe",
+            vad_signals=True,
+            min_silence_ms=250,
+            max_segment_duration_ms=6000,
+            flush_signal=True,
+        ),
         llm=openai.LLM(model=llm_model),
         tts=demo_tts,
         vad=vad,
@@ -821,6 +896,9 @@ async def entrypoint(ctx: JobContext):
             model="saaras:v3",
             mode="transcribe",    # transcribe preserves original language for detection
             flush_signal=True,
+            vad_signals=True,
+            min_silence_ms=250,
+            max_segment_duration_ms=6000,
         )
 
     # ── Build TTS (#10) ───────────────────────────────────────────────────
@@ -848,9 +926,10 @@ async def entrypoint(ctx: JobContext):
 
     def before_tts_cb(agent_response: str) -> str:
         """
-        Returns only the FIRST sentence to TTS.
+        Humanizes string and returns only the FIRST sentence to TTS.
         Remaining sentences are queued as separate interruptible chunks.
         """
+        agent_response = humanize_text(agent_response)
         sentences = re.split(r'(?<=[।.!?])\s+', agent_response.strip())
         return sentences[0] if sentences else agent_response
 
@@ -887,6 +966,7 @@ async def entrypoint(ctx: JobContext):
         min_endpointing_delay=delay_setting if delay_setting else 0.5,
         preemptive_generation=True,
         allow_interruptions=True,
+        before_tts_cb=before_tts_cb,
     )
 
     @session.on("user_speech_started")
