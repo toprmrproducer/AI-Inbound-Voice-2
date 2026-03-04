@@ -196,7 +196,8 @@ def get_live_config(phone_number: str = None):
         if os.path.exists(path):
             try:
                 with open(path, "r") as f:
-                    config = json.load(f)
+                    file_data = json.load(f)
+                config = file_data
                 break
             except Exception as e:
                 logging.getLogger("agent").error(f"Failed to read {path}: {e}")
