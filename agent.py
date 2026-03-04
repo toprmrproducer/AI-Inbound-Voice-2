@@ -252,6 +252,23 @@ async def safe_speak(session, text: str, **kwargs):
         logger.warning("[TTS] safe_speak swallowed error: %s", e)
 
 
+async def upsert_active_call(
+    status: str,
+    *,
+    phone: str | None = None,
+    room_id: str | None = None,
+) -> None:
+    """Logs active-call status. Never raises so jobs can't die from this."""
+    try:
+        logger.info(
+            "[ACTIVE-CALL] %s status=%s phone=%s",
+            room_id or "",
+            status,
+            phone,
+        )
+    except Exception:
+        pass
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TOOL CONTEXT — All AI-callable functions
