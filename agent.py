@@ -597,16 +597,8 @@ async def run_demo_session(ctx: JobContext):
     greeting = live_config.get("first_line") or get_multilingual_greeting("auto")
     
     import asyncio
-    try:
-        # Avoid hanging forever if Sarvam TTS is flaky
-        await asyncio.wait_for(
-            session.say(greeting, allow_interruptions=True),
-            timeout=8.0,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("[DEMO] greeting timed out, continuing anyway")
-    except Exception as e:
-        logger.warning(f"[DEMO] greeting failed: {e}")
+    # safe_speak swallows Sarvam TTS errors so the job never dies
+    await safe_speak(session, greeting, allow_interruptions=True)
 
     logger.info("[DEMO] Session live.")
     
@@ -874,10 +866,8 @@ async def entrypoint(ctx: JobContext):
     logger.info("[AGENT] Session live — waiting for caller audio.")
     call_start_time = datetime.now()
 
-    # #38 — Track active call (in-memory log; no separate DB table needed)
-    async def upsert_active_call(status: str):
-        logger.info(f"[ACTIVE-CALL] {ctx.room.name} status={status}")
-    asyncio.create_task(upsert_active_call("active"))
+    # #38 — Track active call (module-level upsert_active_call — never crashes)
+    asyncio.create_task(upsert_active_call("active", room_id=ctx.room.name))
 
     # ── Start call recording → Cloudflare R2 (via LiveKit egress) ─────────────
     # Requires: R2_ACCESS_KEY, R2_SECRET_KEY, R2_ENDPOINT, R2_BUCKET in env.
