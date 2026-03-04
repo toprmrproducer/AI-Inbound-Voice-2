@@ -15,6 +15,15 @@ logger = logging.getLogger("ui-server")
 
 app = FastAPI(title="Med Spa AI Dashboard")
 
+@app.on_event("startup")
+async def startup_event():
+    import db
+    try:
+        db.init_db()
+        logger.info("Database initialized successfully on startup.")
+    except Exception as e:
+        logger.error(f"Failed to initialize database on startup: {e}")
+
 # ── #22 Health check endpoint ─────────────────────────────────────────────────
 @app.get("/health")
 def health_check():
