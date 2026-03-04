@@ -2034,30 +2034,29 @@ async function loadDashboard() {{
     console.error('Logs fetch failed:', e);
   }}
 
-  // ── DB error banner ─────────────────────────────────────────────────────
-  const dbErr = stats?.db_error;
+  // ── DB error banner ───────────────────────────────────────────────────
+  const dbErr = (stats && stats.db_error) ? stats.db_error : null;
   if (dbErr) {{
     const banner = document.createElement('div');
     banner.id = 'db-error-banner';
     banner.style.cssText = 'background:#ef444420;border:1px solid #ef4444;border-radius:12px;padding:14px 18px;margin-bottom:20px;font-size:13px;line-height:1.6;';
-    banner.innerHTML = `
-      <div style="font-weight:700;color:#ef4444;margin-bottom:6px;">⚠ Database Not Connected</div>
-      <div style="color:var(--text);margin-bottom:8px;">${{dbErr}}</div>
-      <div style="color:var(--muted);">Set <code style="background:var(--surface);padding:2px 5px;border-radius:4px;">DATABASE_URL</code> in your Coolify environment variables.
-      The value should be your Supabase <b>Direct Connection</b> string:<br>
-      <code style="background:var(--surface);padding:3px 8px;border-radius:4px;font-size:11px;">postgresql://postgres:[YOUR-DB-PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres</code><br>
-      <span style="font-size:11px;">Find this in Supabase → Settings → Database → Connection String → URI</span></div>
-      <div style="margin-top:10px;"><a href="/api/db-status" target="_blank" style="color:#60a5fa;font-size:12px;">Check DB status →</a></div>`;
+    banner.innerHTML = '<div style="font-weight:700;color:#ef4444;margin-bottom:6px;">Database Error</div>' +
+      '<div style="color:var(--text);margin-bottom:8px;">' + dbErr + '</div>' +
+      '<div style="color:var(--muted);">Check your DATABASE_URL env var in Coolify. ' +
+      '<a href="/api/db-status" target="_blank" style="color:#60a5fa;">Check DB status</a></div>';
     const pageHeader = document.querySelector('#page-dashboard .stat-grid');
     if (pageHeader) pageHeader.parentNode.insertBefore(banner, pageHeader);
   }}
 
-  // ── Update stat cards ──────────────────────────────────────────────────
-  const fmt = (v, suffix='') => (v !== null && v !== undefined) ? v + suffix : '—';
-  document.getElementById('stat-calls').textContent    = fmt(stats?.total_calls);
-  document.getElementById('stat-bookings').textContent = fmt(stats?.total_bookings);
-  document.getElementById('stat-duration').textContent = fmt(stats?.avg_duration, 's');
-  document.getElementById('stat-rate').textContent     = fmt(stats?.booking_rate, '%');
+  // ── Update stat cards ────────────────────────────────────────────────
+  var fmt = function(v, suffix) {{
+    suffix = suffix || '';
+    return (v !== null && v !== undefined) ? v + suffix : 'N/A';
+  }};
+  document.getElementById('stat-calls').textContent    = fmt(stats && stats.total_calls);
+  document.getElementById('stat-bookings').textContent = fmt(stats && stats.total_bookings);
+  document.getElementById('stat-duration').textContent = fmt(stats && stats.avg_duration, 's');
+  document.getElementById('stat-rate').textContent     = fmt(stats && stats.booking_rate, '%');
 
   // ── Update calls table ─────────────────────────────────────────────────
   if (logs === null) {{
@@ -2094,10 +2093,10 @@ async function loadTelOverview() {{
       fetch('/api/telephony/analytics/overview').then(r => r.json()),
       fetch('/api/telephony/analytics/daily?days=14').then(r => r.json()),
     ]);
-    document.getElementById('tel-stat-campaigns').textContent = overview.total_campaigns ?? '—';
-    document.getElementById('tel-stat-active').textContent = overview.active_campaigns ?? '—';
-    document.getElementById('tel-stat-today').textContent = overview.calls_today ?? '—';
-    document.getElementById('tel-stat-dnc').textContent = overview.dnc_count ?? '—';
+    document.getElementById('tel-stat-campaigns').textContent = (overview.total_campaigns !== undefined) ? overview.total_campaigns : 'N/A';
+    document.getElementById('tel-stat-active').textContent = (overview.active_campaigns !== undefined) ? overview.active_campaigns : 'N/A';
+    document.getElementById('tel-stat-today').textContent = (overview.calls_today !== undefined) ? overview.calls_today : 'N/A';
+    document.getElementById('tel-stat-dnc').textContent = (overview.dnc_count !== undefined) ? overview.dnc_count : 'N/A';
 
     // Build mini bar chart
     const bars = document.getElementById('tel-chart-bars');
