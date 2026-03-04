@@ -53,6 +53,15 @@ def init_db():
                 );
                 -- Safe migration: add language column to existing tables
                 ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto';
+                -- Safe migrations: add new columns to call_logs (existing DBs won't have these)
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS audio_codec TEXT;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS stt_provider TEXT;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS tts_provider TEXT;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS estimated_cost_usd NUMERIC(10,5);
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_hour INTEGER;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_day_of_week TEXT;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS interrupt_count INTEGER DEFAULT 0;
+                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS caller_name TEXT;
                 CREATE INDEX IF NOT EXISTS idx_call_transcripts_room
                     ON call_transcripts (call_room_id);
                 CREATE INDEX IF NOT EXISTS idx_call_logs_phone
