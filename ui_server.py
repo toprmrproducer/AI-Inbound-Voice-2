@@ -1493,6 +1493,76 @@ async def get_dashboard():
     <div id="sip-trunks-list" style="display:grid;gap:12px;"></div>
   </div>
 
+  <!-- ── SIP Trunk Modal ── -->
+  <div id="sip-modal-overlay" onclick="closeSipTrunkModal(event)" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;">
+    <div style="background:var(--surface);border:1px solid rgba(108,99,255,0.3);border-radius:18px;padding:36px 32px;width:min(500px,94vw);max-height:90vh;overflow-y:auto;" onclick="event.stopPropagation()">
+      <div style="font-size:18px;font-weight:700;margin-bottom:24px;">🔌 Add SIP Trunk</div>
+      <div class="form-group">
+        <label>Trunk Name <span style="color:#f87171">*</span></label>
+        <input type="text" id="sip-name" placeholder="e.g. Vobiz Primary">
+      </div>
+      <div class="form-group">
+        <label>Provider <span style="color:#f87171">*</span></label>
+        <input type="text" id="sip-provider" placeholder="e.g. twilio, exotel, vobiz">
+      </div>
+      <div class="form-group">
+        <label>SIP URI <span style="color:#f87171">*</span></label>
+        <input type="text" id="sip-uri" placeholder="sip:user@sip.provider.com">
+      </div>
+      <div class="form-group">
+        <label>Masked Caller ID (E.164)</label>
+        <input type="text" id="sip-callerid" placeholder="+919876543210">
+        <div class="hint">Number shown to the callee — leave blank to use provider default</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group">
+          <label>SIP Username</label>
+          <input type="text" id="sip-username" placeholder="Optional">
+        </div>
+        <div class="form-group">
+          <label>SIP Password</label>
+          <input type="password" id="sip-password" placeholder="Optional">
+        </div>
+      </div>
+      <div id="sip-modal-error" style="color:#f87171;font-size:13px;margin-bottom:12px;display:none;"></div>
+      <div style="display:flex;gap:10px;margin-top:8px;">
+        <button class="btn btn-primary" style="flex:1" onclick="submitSipTrunk()">Save Trunk</button>
+        <button class="btn btn-ghost" onclick="closeSipTrunkModal()" style="width:100px;">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Campaign Modal ── -->
+  <div id="campaign-modal-overlay" onclick="closeCampaignModal(event)" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;">
+    <div style="background:var(--surface);border:1px solid rgba(108,99,255,0.3);border-radius:18px;padding:36px 32px;width:min(520px,94vw);max-height:90vh;overflow-y:auto;" onclick="event.stopPropagation()">
+      <div style="font-size:18px;font-weight:700;margin-bottom:24px;">📋 New Campaign</div>
+      <div class="form-group">
+        <label>Campaign Name <span style="color:#f87171">*</span></label>
+        <input type="text" id="camp-name" placeholder="e.g. March Follow-up Campaign">
+      </div>
+      <div class="form-group">
+        <label>Phone Numbers <span style="color:#f87171">*</span></label>
+        <textarea id="camp-phones" rows="6" placeholder="+919876543210&#10;+918765432109&#10;+917654321098" style="font-family:monospace;"></textarea>
+        <div class="hint">One number per line, in E.164 format (+countrycode...)</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group">
+          <label>Max Concurrent Calls</label>
+          <input type="number" id="camp-maxconc" value="5" min="1" max="50">
+        </div>
+        <div class="form-group">
+          <label>Notes</label>
+          <input type="text" id="camp-notes" placeholder="Optional">
+        </div>
+      </div>
+      <div id="camp-modal-error" style="color:#f87171;font-size:13px;margin-bottom:12px;display:none;"></div>
+      <div style="display:flex;gap:10px;margin-top:8px;">
+        <button class="btn btn-primary" style="flex:1" onclick="submitCampaign()">Create Campaign</button>
+        <button class="btn btn-ghost" onclick="closeCampaignModal()" style="width:100px;">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Demo Links Page ── -->
   <div id="page-demos" class="page">
     <div class="page-header">
@@ -2082,17 +2152,35 @@ async function updateCampaignStatus(id, status) {{
 }}
 
 function openCampaignModal() {{
-  const name = prompt('Campaign name:');
-  if (!name) return;
-  const phones = prompt('Phone numbers (one per line, E.164 format):');
-  if (!phones) return;
-  const maxConc = prompt('Max concurrent calls:', '5') || '5';
-  const notes = prompt('Notes (optional):') || '';
-  fetch('/api/campaigns', {{
-    method:'POST',
-    headers:{{'Content-Type':'application/json'}},
-    body:JSON.stringify({{name, phone_numbers:phones, max_concurrent_calls:parseInt(maxConc), notes}})
-  }}).then(r=>r.json()).then(()=>{{ alert('✅ Campaign created!'); loadCampaigns(); }}).catch(()=>alert('❌ Failed to create campaign'));
+  document.getElementById('camp-name').value = '';
+  document.getElementById('camp-phones').value = '';
+  document.getElementById('camp-maxconc').value = '5';
+  document.getElementById('camp-notes').value = '';
+  document.getElementById('camp-modal-error').style.display = 'none';
+  const overlay = document.getElementById('campaign-modal-overlay');
+  overlay.style.display = 'flex';
+}}
+function closeCampaignModal(e) {{
+  if (e && e.target !== document.getElementById('campaign-modal-overlay')) return;
+  document.getElementById('campaign-modal-overlay').style.display = 'none';
+}}
+async function submitCampaign() {{
+  const name = document.getElementById('camp-name').value.trim();
+  const phones = document.getElementById('camp-phones').value.trim();
+  const maxConc = parseInt(document.getElementById('camp-maxconc').value) || 5;
+  const notes = document.getElementById('camp-notes').value.trim();
+  const errEl = document.getElementById('camp-modal-error');
+  if (!name || !phones) {{ errEl.textContent = 'Name and phone numbers are required.'; errEl.style.display='block'; return; }}
+  errEl.style.display = 'none';
+  try {{
+    const r = await fetch('/api/campaigns', {{
+      method:'POST', headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{name, phone_numbers:phones, max_concurrent_calls:maxConc, notes}})
+    }});
+    if (!r.ok) throw new Error('Server error ' + r.status);
+    document.getElementById('campaign-modal-overlay').style.display = 'none';
+    loadCampaigns();
+  }} catch(e) {{ errEl.textContent = '❌ Failed: ' + e.message; errEl.style.display='block'; }}
 }}
 
 // ── SIP Trunks ────────────────────────────────────────────────────────────────
@@ -2126,20 +2214,35 @@ async function deleteSipTrunk(id) {{
 }}
 
 function openSipTrunkModal() {{
-  const name = prompt('Trunk name (e.g., "Vobiz Primary"):');
-  if (!name) return;
-  const provider = prompt('Provider (e.g., twilio, exotel, vobiz):');
-  if (!provider) return;
-  const sip_uri = prompt('SIP URI (e.g., sip:user@sip.provider.com):');
-  if (!sip_uri) return;
-  const caller_id_number = prompt('Caller ID / Masked Number (E.164 e.g. +919XXXXXXXX):') || '';
-  const username = prompt('SIP Username (optional):') || '';
-  const password = prompt('SIP Password (optional):') || '';
-  fetch('/api/sip-trunks', {{
-    method:'POST',
-    headers:{{'Content-Type':'application/json'}},
-    body:JSON.stringify({{name, provider, sip_uri, caller_id_number, username, password}})
-  }}).then(r=>r.json()).then(()=>{{ alert('✅ SIP Trunk added!'); loadSipTrunks(); }}).catch(()=>alert('❌ Failed to add SIP trunk'));
+  ['sip-name','sip-provider','sip-uri','sip-callerid','sip-username','sip-password'].forEach(id => {{
+    document.getElementById(id).value = '';
+  }});
+  document.getElementById('sip-modal-error').style.display = 'none';
+  document.getElementById('sip-modal-overlay').style.display = 'flex';
+}}
+function closeSipTrunkModal(e) {{
+  if (e && e.target !== document.getElementById('sip-modal-overlay')) return;
+  document.getElementById('sip-modal-overlay').style.display = 'none';
+}}
+async function submitSipTrunk() {{
+  const name = document.getElementById('sip-name').value.trim();
+  const provider = document.getElementById('sip-provider').value.trim();
+  const sip_uri = document.getElementById('sip-uri').value.trim();
+  const caller_id_number = document.getElementById('sip-callerid').value.trim();
+  const username = document.getElementById('sip-username').value.trim();
+  const password = document.getElementById('sip-password').value.trim();
+  const errEl = document.getElementById('sip-modal-error');
+  if (!name || !provider || !sip_uri) {{ errEl.textContent = 'Name, Provider, and SIP URI are required.'; errEl.style.display='block'; return; }}
+  errEl.style.display = 'none';
+  try {{
+    const r = await fetch('/api/sip-trunks', {{
+      method:'POST', headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{name, provider, sip_uri, caller_id_number, username, password}})
+    }});
+    if (!r.ok) throw new Error('Server error ' + r.status);
+    document.getElementById('sip-modal-overlay').style.display = 'none';
+    loadSipTrunks();
+  }} catch(e) {{ errEl.textContent = '❌ Failed: ' + e.message; errEl.style.display='block'; }}
 }}
 
 // ── Demo Links ────────────────────────────────────────────────────────────────
