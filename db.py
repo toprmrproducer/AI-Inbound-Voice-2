@@ -1,678 +1,621 @@
+# db.py — Pure PostgreSQL via psycopg2, no Supabase
 import os
 import logging
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from datetime import datetime
+from datetime import datetime, timedelta
+from contextlib import contextmanager
+
+import pytz
 
 logger = logging.getLogger("db")
 
+# ── Connection Pool ───────────────────────────────────────────────────────────
+_pool = None
 
-def _get_db_url() -> str:
-    """
-    Resolve the PostgreSQL connection string from environment variables.
-    Tried in order:
-      1. DATABASE_URL
-      2. POSTGRES_URL
-      3. POSTGRES_CONN
-      4. Supabase pooler URL built from SUPABASE_DB_URL (if set explicitly)
-    Raises RuntimeError with a clear diagnostic message if nothing is available.
-    """
-    for key in ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_CONN", "SUPABASE_DB_URL"):
-        val = os.environ.get(key, "").strip()
+
+def _build_dsn() -> str:
+    """Resolve the Postgres DSN from env vars. Tries several common names."""
+    for key in ("DATABASE_URL", "POSTGRES_URL", "DB_URL", "POSTGRES_CONN"):
+        val = (os.environ.get(key) or "").strip()
         if val:
-            # Normalise postgres:// → postgresql:// (psycopg2 prefers the latter)
+            # psycopg2 needs postgresql://, not postgres://
             if val.startswith("postgres://"):
                 val = "postgresql://" + val[len("postgres://"):]
             return val
-    raise RuntimeError(
-        "No database connection URL found. "
-        "Set DATABASE_URL (or POSTGRES_URL) in your environment / Coolify variables. "
-        "Example: DATABASE_URL=postgresql://postgres:[password]@db.[ref].supabase.co:5432/postgres"
-    )
+    # Fall back to individual parts
+    host     = os.environ.get("POSTGRES_HOST", "localhost")
+    port     = os.environ.get("POSTGRES_PORT", "5432")
+    db       = os.environ.get("POSTGRES_DB",   "postgres")
+    user     = os.environ.get("POSTGRES_USER",     "postgres")
+    password = os.environ.get("POSTGRES_PASSWORD", "")
+    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 
-def get_conn():
-    """Return a new psycopg2 connection. Raises RuntimeError if no DB URL is configured."""
-    url = _get_db_url()
-    return psycopg2.connect(url)
+def _get_pool():
+    global _pool
+    if _pool is None:
+        from psycopg2 import pool as pg_pool
+        dsn = _build_dsn()
+        _pool = pg_pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=dsn)
+        logger.info("[DB] Connection pool created")
+    return _pool
 
 
-
-def _exec_ddl(conn, sql: str, label: str = ""):
-    """Execute a single DDL statement, log errors but don't raise."""
+@contextmanager
+def _get_conn():
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(sql)
+        yield conn
         conn.commit()
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        logger.warning(f"[DB] DDL '{label}' skipped: {e}")
+        raise
+    finally:
+        pool.putconn(conn)
 
+
+# Public alias used by some older code paths
+def get_conn():
+    """Return a raw psycopg2 connection (caller must close/commit)."""
+    from psycopg2 import connect
+    return connect(_build_dsn())
+
+
+def _get_db_url() -> str:
+    """Return the resolved DSN (used by /api/db-status)."""
+    return _build_dsn()
+
+
+# ── Startup / Health ──────────────────────────────────────────────────────────
 
 def init_db():
-    """Create all tables and run migrations. Each statement is committed separately."""
-    conn = get_conn()
+    """
+    Verify DB is reachable and the core tables exist.
+    The actual schema must be applied via the SQL migration in the README.
+    This no longer tries to CREATE tables — that caused psycopg2 multi-statement bugs.
+    """
     try:
-        # ── Core tables ──────────────────────────────────────────────────────
-        _exec_ddl(conn, """
-            CREATE TABLE IF NOT EXISTS call_logs (
-                id SERIAL PRIMARY KEY,
-                phone TEXT,
-                caller_name TEXT,
-                duration INTEGER,
-                transcript TEXT,
-                summary TEXT,
-                recording_url TEXT,
-                sentiment TEXT,
-                estimated_cost_usd NUMERIC(10,5),
-                call_date DATE,
-                call_hour INTEGER,
-                call_day_of_week TEXT,
-                was_booked BOOLEAN DEFAULT FALSE,
-                interrupt_count INTEGER DEFAULT 0,
-                stt_provider TEXT,
-                tts_provider TEXT,
-                audio_codec TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )
-        """, "create call_logs")
-
-        _exec_ddl(conn, """
-            CREATE TABLE IF NOT EXISTS call_transcripts (
-                id SERIAL PRIMARY KEY,
-                call_room_id TEXT NOT NULL,
-                phone TEXT,
-                role TEXT CHECK (role IN ('user', 'assistant')),
-                content TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )
-        """, "create call_transcripts")
-
-        _exec_ddl(conn, """
-            CREATE TABLE IF NOT EXISTS demo_links (
-                id SERIAL PRIMARY KEY,
-                slug TEXT UNIQUE NOT NULL,
-                label TEXT,
-                language TEXT DEFAULT 'auto',
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                is_active BOOLEAN DEFAULT TRUE,
-                total_sessions INTEGER DEFAULT 0
-            )
-        """, "create demo_links")
-
-        # ── Mass calling tables ───────────────────────────────────────────────
-        _exec_ddl(conn, """
-            CREATE TABLE IF NOT EXISTS sip_trunks (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                name TEXT NOT NULL,
-                provider TEXT NOT NULL DEFAULT 'vobiz',
-                trunk_type TEXT NOT NULL DEFAULT 'outbound',
-                sip_address TEXT NOT NULL DEFAULT '',
-                auth_username TEXT DEFAULT '',
-                auth_password TEXT DEFAULT '',
-                number_pool JSONB DEFAULT '[]'::JSONB,
-                livekit_trunk_id TEXT DEFAULT '',
-                max_concurrent_calls INT DEFAULT 10,
-                max_calls_per_number_per_day INT DEFAULT 150,
-                is_active BOOLEAN DEFAULT TRUE,
-                notes TEXT DEFAULT ''
-            )
-        """, "create sip_trunks")
-
-        _exec_ddl(conn, """
-            CREATE TABLE IF NOT EXISTS voice_agent_configs (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                name TEXT NOT NULL,
-                preset_type TEXT NOT NULL DEFAULT 'custom',
-                sip_trunk_id UUID REFERENCES sip_trunks(id) ON DELETE SET NULL,
-                cli_override TEXT DEFAULT '',
-                llm_model TEXT DEFAULT 'gpt-4o-mini',
-                llm_provider TEXT DEFAULT 'openai',
-                tts_provider TEXT DEFAULT 'sarvam',
-                tts_voice TEXT DEFAULT 'rohan',
-                tts_language TEXT DEFAULT 'hi-IN',
-                stt_provider TEXT DEFAULT 'sarvam',
-                stt_language TEXT DEFAULT 'hi-IN',
-                agent_instructions TEXT DEFAULT '',
-                first_line TEXT DEFAULT '',
-                max_call_duration_seconds INT DEFAULT 300,
-                max_turns INT DEFAULT 25,
-                call_window_start TIME DEFAULT '09:30',
-                call_window_end TIME DEFAULT '19:30',
-                timezone TEXT DEFAULT 'Asia/Kolkata',
-                is_active BOOLEAN DEFAULT TRUE
-            )
-        """, "create voice_agent_configs")
-
-        _exec_ddl(conn, """
-            CREATE TABLE IF NOT EXISTS campaigns (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                name TEXT NOT NULL,
-                status TEXT DEFAULT 'draft',
-                agent_config_id UUID REFERENCES voice_agent_configs(id) ON DELETE SET NULL,
-                sip_trunk_id UUID REFERENCES sip_trunks(id) ON DELETE SET NULL,
-                max_calls_per_minute INT DEFAULT 5,
-                max_retries_per_lead INT DEFAULT 2,
-                retry_delay_hours INT DEFAULT 4,
-                daily_start_time TIME DEFAULT '09:30',
-                daily_end_time TIME DEFAULT '19:30',
-                timezone TEXT DEFAULT 'Asia/Kolkata',
-                total_leads INT DEFAULT 0,
-                called_count INT DEFAULT 0,
-                answered_count INT DEFAULT 0,
-                booked_count INT DEFAULT 0,
-                notes TEXT DEFAULT '',
-                completed_at TIMESTAMPTZ
-            )
-        """, "create campaigns")
-
-        _exec_ddl(conn, """
-            CREATE TABLE IF NOT EXISTS campaign_leads (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
-                phone TEXT NOT NULL,
-                name TEXT DEFAULT '',
-                email TEXT DEFAULT '',
-                custom_data JSONB DEFAULT '{}'::JSONB,
-                status TEXT DEFAULT 'pending',
-                attempts INT DEFAULT 0,
-                last_attempt_at TIMESTAMPTZ,
-                last_result TEXT DEFAULT '',
-                livekit_room_id TEXT DEFAULT '',
-                call_duration_seconds INT DEFAULT 0,
-                booked BOOLEAN DEFAULT FALSE,
-                notes TEXT DEFAULT ''
-            )
-        """, "create campaign_leads")
-
-        _exec_ddl(conn, """
-            CREATE TABLE IF NOT EXISTS dnc_list (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                phone TEXT UNIQUE NOT NULL,
-                reason TEXT DEFAULT 'manual',
-                source TEXT DEFAULT 'dashboard'
-            )
-        """, "create dnc_list")
-
-        # ── Safe column migrations (ADD COLUMN IF NOT EXISTS) ────────────────
-        for col_sql, label in [
-            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS caller_name TEXT", "add caller_name"),
-            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS campaign_id UUID", "add campaign_id"),
-            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS agent_config_id UUID", "add agent_config_id"),
-            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS cli_used TEXT DEFAULT ''", "add cli_used"),
-            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_type TEXT DEFAULT 'inbound'", "add call_type"),
-            ("ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto'", "add demo_links.language"),
-        ]:
-            _exec_ddl(conn, col_sql, label)
-
-        # ── Indexes (IF NOT EXISTS — safe) ───────────────────────────────────
-        for idx_sql, label in [
-            ("CREATE INDEX IF NOT EXISTS idx_call_transcripts_room ON call_transcripts (call_room_id)", "idx_transcripts_room"),
-            ("CREATE INDEX IF NOT EXISTS idx_call_logs_phone ON call_logs (phone)", "idx_logs_phone"),
-            ("CREATE INDEX IF NOT EXISTS idx_call_logs_created ON call_logs (created_at)", "idx_logs_created"),
-            ("CREATE INDEX IF NOT EXISTS idx_demo_links_slug ON demo_links (slug)", "idx_demo_slug"),
-            ("CREATE INDEX IF NOT EXISTS idx_leads_campaign_status ON campaign_leads (campaign_id, status)", "idx_leads_status"),
-            ("CREATE INDEX IF NOT EXISTS idx_leads_phone ON campaign_leads (phone)", "idx_leads_phone"),
-            ("CREATE INDEX IF NOT EXISTS idx_call_logs_campaign ON call_logs (campaign_id)", "idx_logs_campaign"),
-            ("CREATE INDEX IF NOT EXISTS idx_dnc_phone ON dnc_list (phone)", "idx_dnc_phone"),
-        ]:
-            _exec_ddl(conn, idx_sql, label)
-
-    finally:
-        conn.close()
-
-    logger.info("[DB] Tables initialized successfully")
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                # Confirm the call_logs table exists
+                cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name='call_logs'"
+                )
+                exists = cur.fetchone()[0]
+                if not exists:
+                    logger.warning(
+                        "[DB] 'call_logs' table NOT found. "
+                        "Run the SQL migration from the README first!"
+                    )
+                else:
+                    cur.execute("SELECT COUNT(*) FROM call_logs")
+                    count = cur.fetchone()[0]
+                    logger.info(f"[DB] init_db OK — call_logs has {count} rows")
+    except Exception as e:
+        logger.error(f"[DB] init_db FAILED: {e}")
+        raise
 
 
-
-
+# ── Call Logs ─────────────────────────────────────────────────────────────────
 
 def save_call_log(
-    phone, duration, transcript, summary,
-    recording_url=None, sentiment=None,
-    estimated_cost_usd=None, call_date=None,
-    call_hour=None, call_day_of_week=None,
-    was_booked=False, interrupt_count=0,
-    stt_provider=None, tts_provider=None,
-    audio_codec=None, caller_name=None,
-):
+    phone: str = "unknown",
+    duration: int = 0,
+    transcript: str = "",
+    summary: str = "",
+    recording_url: str = "",
+    sentiment: str = "unknown",
+    interrupt_count: int = 0,
+    estimated_cost_usd: float = 0.0,
+    call_date=None,
+    call_hour: int = 0,
+    call_day_of_week: str = "",
+    was_booked: bool = False,
+    stt_provider: str = "sarvam",
+    tts_provider: str = "sarvam",
+    call_type: str = "inbound",
+    cli_used: str = "",
+    caller_name: str = "",
+    llm_model: str = "gpt-4o-mini",
+    audio_codec: str = "",
+    **kwargs,
+) -> dict | None:
+    ist = pytz.timezone("Asia/Kolkata")
+    if not call_date:
+        call_date = datetime.now(ist).date().isoformat()
+    if not call_hour:
+        call_hour = datetime.now(ist).hour
+
     try:
-        with get_conn() as conn:
+        with _get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO call_logs (
-                        phone, duration, transcript, summary,
-                        recording_url, sentiment, estimated_cost_usd,
+                        phone, caller_name, duration, call_type,
                         call_date, call_hour, call_day_of_week,
-                        was_booked, interrupt_count,
-                        stt_provider, tts_provider, audio_codec
+                        was_booked, sentiment, summary, transcript,
+                        recording_url, estimated_cost_usd,
+                        stt_provider, tts_provider, llm_model,
+                        cli_used, interrupt_count
                     ) VALUES (
                         %s, %s, %s, %s,
                         %s, %s, %s,
-                        %s, %s, %s,
+                        %s, %s, %s, %s,
                         %s, %s,
-                        %s, %s, %s
+                        %s, %s, %s,
+                        %s, %s
                     )
+                    RETURNING id, created_at
                 """, (
-                    phone, duration, transcript, summary,
-                    recording_url, sentiment, estimated_cost_usd,
-                    call_date, call_hour, call_day_of_week,
-                    was_booked, interrupt_count,
-                    stt_provider, tts_provider, audio_codec,
+                    phone or "unknown", caller_name or "", int(duration or 0), call_type or "inbound",
+                    call_date, int(call_hour or 0), call_day_of_week or "",
+                    bool(was_booked), sentiment or "unknown", summary or "", transcript or "",
+                    recording_url or "", float(estimated_cost_usd or 0),
+                    stt_provider or "sarvam", tts_provider or "sarvam", llm_model or "gpt-4o-mini",
+                    cli_used or "", int(interrupt_count or 0),
                 ))
-                conn.commit()
-        logger.info(f"[DB] Call log saved for {phone}")
+                row = cur.fetchone()
+                inserted_id = str(row[0]) if row else None
+
+        # Upsert CRM contact (non-fatal)
+        try:
+            upsert_crm_contact(phone=phone, name=caller_name or "")
+        except Exception as crm_err:
+            logger.warning(f"[DB] CRM upsert skipped: {crm_err}")
+
+        logger.info(f"[DB] save_call_log OK — id={inserted_id} phone={phone} duration={duration}s booked={was_booked}")
+        return {"id": inserted_id}
     except Exception as e:
-        logger.error(f"[DB] Failed to save call log: {e}")
+        logger.error(f"[DB] save_call_log FAILED: {e}")
+        raise
 
 
-def log_transcript_line(call_room_id, phone, role, content):
+def fetch_call_logs(limit: int = 100, offset: int = 0) -> list:
     try:
-        with get_conn() as conn:
+        with _get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO call_transcripts
-                        (call_room_id, phone, role, content)
-                    VALUES (%s, %s, %s, %s)
-                """, (call_room_id, phone, role, content))
-                conn.commit()
+                    SELECT
+                        id, created_at, phone, caller_name, duration,
+                        call_type, was_booked, sentiment, summary,
+                        recording_url, estimated_cost_usd, stt_provider,
+                        tts_provider, llm_model, interrupt_count, call_date
+                    FROM call_logs
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s
+                """, (limit, offset))
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+        for r in rows:
+            if r.get("created_at"): r["created_at"]  = r["created_at"].isoformat()
+            if r.get("call_date"):  r["call_date"]    = str(r["call_date"])
+            if r.get("id"):         r["id"]           = str(r["id"])
+            # Aliases for backward-compat with the UI
+            r["phone_number"]       = r.get("phone", "")
+            r["duration_seconds"]   = r.get("duration", 0)
+
+        logger.info(f"[DB] fetch_call_logs returned {len(rows)} rows")
+        return rows
     except Exception as e:
-        logger.warning(f"[DB] Transcript line failed: {e}")
-
-
-def fetch_call_logs(limit: int = 50) -> list:
-    try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT * FROM call_logs ORDER BY created_at DESC LIMIT %s",
-                    (limit,)
-                )
-                rows = cur.fetchall()
-                # Convert to plain dicts and normalise field names for UI
-                result = []
-                for r in rows:
-                    d = dict(r)
-                    # Map to the field names the UI dashboard expects
-                    d["phone_number"] = d.get("phone", "")
-                    d["duration_seconds"] = d.get("duration", 0)
-                    result.append(d)
-                return result
-    except Exception as e:
-        logger.error(f"[DB] fetch_call_logs failed: {e}")
-        return []
-
-
-def fetch_bookings() -> list:
-    try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT * FROM call_logs WHERE summary ILIKE '%Confirmed%' "
-                    "ORDER BY created_at DESC LIMIT 200"
-                )
-                return [dict(r) for r in cur.fetchall()]
-    except Exception as e:
-        logger.error(f"[DB] fetch_bookings failed: {e}")
+        logger.error(f"[DB] fetch_call_logs FAILED: {e}")
         return []
 
 
 def fetch_stats() -> dict:
+    """Alias for fetch_dashboard_stats — keeps old callers working."""
+    return fetch_dashboard_stats()
+
+
+def fetch_dashboard_stats() -> dict:
     try:
-        with get_conn() as conn:
+        ist = pytz.timezone("Asia/Kolkata")
+        today_str    = datetime.now(ist).date().isoformat()
+        week_ago_str = (datetime.now(ist) - timedelta(days=7)).date().isoformat()
+
+        with _get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM call_logs")
-                total = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM call_logs WHERE summary ILIKE '%Confirmed%'")
-                bookings = cur.fetchone()[0]
-                cur.execute("SELECT AVG(duration) FROM call_logs WHERE duration IS NOT NULL")
-                avg_dur_raw = cur.fetchone()[0]
-                avg_dur = round(float(avg_dur_raw)) if avg_dur_raw else 0
-                rate = round((bookings / total) * 100) if total else 0
-                return {
-                    "total_calls": total,
-                    "total_bookings": bookings,
-                    "avg_duration": avg_dur,
-                    "booking_rate": rate,
-                }
+                total_calls = cur.fetchone()[0]
+
+                cur.execute("SELECT COUNT(*) FROM call_logs WHERE call_date = %s", (today_str,))
+                calls_today = cur.fetchone()[0]
+
+                cur.execute("SELECT COUNT(*) FROM call_logs WHERE call_date >= %s", (week_ago_str,))
+                calls_this_week = cur.fetchone()[0]
+
+                cur.execute("SELECT COUNT(*) FROM call_logs WHERE was_booked = true")
+                bookings_made = cur.fetchone()[0]
+
+                cur.execute("SELECT COALESCE(AVG(duration), 0) FROM call_logs WHERE duration IS NOT NULL")
+                avg_duration = round(float(cur.fetchone()[0]))
+
+                cur.execute("SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM call_logs")
+                total_cost = round(float(cur.fetchone()[0]), 4)
+
+        booking_rate = round(bookings_made / max(total_calls, 1) * 100, 1)
+
+        return {
+            "total_calls":      total_calls,
+            "total_bookings":   bookings_made,
+            "avg_duration":     avg_duration,
+            "booking_rate":     booking_rate,
+            "calls_today":      calls_today,
+            "calls_this_week":  calls_this_week,
+            "total_cost_usd":   total_cost,
+            "db_error":         None,
+        }
     except Exception as e:
-        logger.error(f"[DB] fetch_stats failed: {e}")
-        return {"total_calls": 0, "total_bookings": 0, "avg_duration": 0, "booking_rate": 0}
+        logger.error(f"[DB] fetch_dashboard_stats FAILED: {e}")
+        return {
+            "total_calls": None, "total_bookings": None,
+            "avg_duration": None, "booking_rate": None,
+            "db_error": str(e),
+        }
 
 
-# ── Telephony / Mass Calling Helpers ─────────────────────────────────────────
+# ── Transcript Lines ──────────────────────────────────────────────────────────
+
+def log_transcript_line(call_room_id: str, phone: str, role: str, content: str):
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO transcript_lines (room_id, phone, role, content)
+                    VALUES (%s, %s, %s, %s)
+                """, (call_room_id, phone, role, content))
+    except Exception as e:
+        logger.warning(f"[DB] log_transcript_line failed (non-critical): {e}")
+
+
+# ── CRM Contacts ──────────────────────────────────────────────────────────────
+
+def upsert_crm_contact(phone: str, name: str = ""):
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO crm_contacts (phone, name, last_call, total_calls)
+                    VALUES (%s, %s, NOW(), 1)
+                    ON CONFLICT (phone) DO UPDATE SET
+                        last_call   = NOW(),
+                        total_calls = crm_contacts.total_calls + 1,
+                        name        = CASE WHEN %s != '' THEN %s ELSE crm_contacts.name END
+                """, (phone, name, name, name))
+    except Exception as e:
+        logger.warning(f"[DB] upsert_crm_contact failed: {e}")
+
+
+def fetch_crm_contacts(limit: int = 200) -> list:
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, created_at, phone, name, email,
+                           last_call, total_calls, was_booked, notes
+                    FROM crm_contacts
+                    ORDER BY last_call DESC NULLS LAST
+                    LIMIT %s
+                """, (limit,))
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            if r.get("id"):         r["id"]         = str(r["id"])
+            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
+            if r.get("last_call"):  r["last_call"]  = r["last_call"].isoformat()
+        return rows
+    except Exception as e:
+        logger.error(f"[DB] fetch_crm_contacts FAILED: {e}")
+        return []
+
+
+# ── Demo Links ────────────────────────────────────────────────────────────────
+
+def fetch_demo_links() -> list:
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM demo_links ORDER BY created_at DESC")
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
+        return rows
+    except Exception as e:
+        logger.error(f"[DB] fetch_demo_links FAILED: {e}")
+        return []
+
+
+# ── Mass Calling helpers (stubs — tables created by SQL migration) ─────────────
 
 def fetch_trunks() -> list:
     try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
                 cur.execute("SELECT * FROM sip_trunks ORDER BY created_at DESC")
-                return [dict(r) for r in cur.fetchall()]
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            if r.get("id"):         r["id"]         = str(r["id"])
+            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
+            if r.get("number_pool") is None: r["number_pool"] = []
+        return rows
     except Exception as e:
-        logger.error(f"[DB] fetch_trunks failed: {e}")
+        logger.error(f"[DB] fetch_trunks FAILED: {e}")
         return []
 
 
 def insert_trunk(data: dict) -> dict:
-    cols = list(data.keys())
-    vals = list(data.values())
-    placeholders = ", ".join(["%s"] * len(cols))
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                f"INSERT INTO sip_trunks ({', '.join(cols)}) VALUES ({placeholders}) RETURNING *",
-                vals
-            )
-            row = dict(cur.fetchone())
-            conn.commit()
-    return row
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                import json
+                cur.execute("""
+                    INSERT INTO sip_trunks
+                        (name, provider, trunk_type, sip_address,
+                         auth_username, auth_password, number_pool,
+                         max_concurrent_calls, notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                """, (
+                    data.get("name",""), data.get("provider","vobiz"),
+                    data.get("trunk_type","outbound"), data.get("sip_address",""),
+                    data.get("auth_username",""), data.get("auth_password",""),
+                    json.dumps(data.get("number_pool",[])),
+                    int(data.get("max_concurrent_calls",10)), data.get("notes",""),
+                ))
+                row = cur.fetchone()
+        return {"id": str(row[0]) if row else None}
+    except Exception as e:
+        logger.error(f"[DB] insert_trunk FAILED: {e}")
+        raise
 
 
-def delete_trunk_by_id(trunk_id: str):
-    with get_conn() as conn:
+def delete_trunk(trunk_id: str):
+    with _get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM sip_trunks WHERE id = %s", (trunk_id,))
-            conn.commit()
 
 
 def fetch_agent_configs() -> list:
     try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT vac.*, st.name as trunk_name, st.provider as trunk_provider
-                    FROM voice_agent_configs vac
-                    LEFT JOIN sip_trunks st ON vac.sip_trunk_id = st.id
-                    WHERE vac.is_active = TRUE
-                    ORDER BY vac.created_at DESC
-                    """
-                )
-                return [dict(r) for r in cur.fetchall()]
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM voice_agent_configs ORDER BY created_at DESC")
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            if r.get("id"):              r["id"]              = str(r["id"])
+            if r.get("sip_trunk_id"):    r["sip_trunk_id"]    = str(r["sip_trunk_id"])
+            if r.get("created_at"):      r["created_at"]      = r["created_at"].isoformat()
+            if r.get("call_window_start"): r["call_window_start"] = str(r["call_window_start"])
+            if r.get("call_window_end"):   r["call_window_end"]   = str(r["call_window_end"])
+        return rows
     except Exception as e:
-        logger.error(f"[DB] fetch_agent_configs failed: {e}")
+        logger.error(f"[DB] fetch_agent_configs FAILED: {e}")
         return []
 
 
 def insert_agent_config(data: dict) -> dict:
-    ALLOWED = [
-        "name", "preset_type", "sip_trunk_id", "cli_override", "llm_model", "llm_provider",
-        "tts_provider", "tts_voice", "tts_language", "stt_provider", "stt_language",
-        "agent_instructions", "first_line", "max_call_duration_seconds", "max_turns",
-        "call_window_start", "call_window_end", "timezone"
-    ]
-    filtered = {k: v for k, v in data.items() if k in ALLOWED and v is not None}
-    cols = list(filtered.keys())
-    vals = list(filtered.values())
-    placeholders = ", ".join(["%s"] * len(cols))
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                f"INSERT INTO voice_agent_configs ({', '.join(cols)}) VALUES ({placeholders}) RETURNING *",
-                vals
-            )
-            row = dict(cur.fetchone())
-            conn.commit()
-    return row
-
-
-def update_agent_config(config_id: str, data: dict) -> dict:
-    ALLOWED = [
-        "name", "preset_type", "sip_trunk_id", "llm_model", "llm_provider",
-        "tts_provider", "tts_voice", "tts_language", "stt_language",
-        "agent_instructions", "first_line", "max_call_duration_seconds", "max_turns",
-        "call_window_start", "call_window_end", "timezone"
-    ]
-    filtered = {k: v for k, v in data.items() if k in ALLOWED and v is not None}
-    if not filtered:
-        return {}
-    sets = ", ".join([f"{k} = %s" for k in filtered.keys()])
-    vals = list(filtered.values()) + [config_id]
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(f"UPDATE voice_agent_configs SET {sets} WHERE id = %s RETURNING *", vals)
-            row = dict(cur.fetchone() or {})
-            conn.commit()
-    return row
-
-
-def soft_delete_agent_config(config_id: str):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE voice_agent_configs SET is_active = FALSE WHERE id = %s", (config_id,))
-            conn.commit()
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO voice_agent_configs
+                        (name, preset_type, sip_trunk_id, cli_override,
+                         llm_model, tts_provider, tts_voice, tts_language,
+                         stt_provider, stt_language, agent_instructions, first_line,
+                         max_call_duration_seconds, max_turns,
+                         call_window_start, call_window_end, timezone)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                """, (
+                    data.get("name",""), data.get("preset_type","custom"),
+                    data.get("sip_trunk_id") or None, data.get("cli_override",""),
+                    data.get("llm_model","gpt-4o-mini"), data.get("tts_provider","sarvam"),
+                    data.get("tts_voice","rohan"), data.get("tts_language","hi-IN"),
+                    data.get("stt_provider","sarvam"), data.get("stt_language","hi-IN"),
+                    data.get("agent_instructions",""), data.get("first_line",""),
+                    int(data.get("max_call_duration_seconds",300)), int(data.get("max_turns",25)),
+                    data.get("call_window_start","09:30"), data.get("call_window_end","19:30"),
+                    data.get("timezone","Asia/Kolkata"),
+                ))
+                row = cur.fetchone()
+        return {"id": str(row[0]) if row else None}
+    except Exception as e:
+        logger.error(f"[DB] insert_agent_config FAILED: {e}")
+        raise
 
 
 def fetch_campaigns() -> list:
     try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT c.*,
-                           vac.name as config_name, vac.preset_type,
-                           st.name as trunk_name, st.provider as trunk_provider
-                    FROM campaigns c
-                    LEFT JOIN voice_agent_configs vac ON c.agent_config_id = vac.id
-                    LEFT JOIN sip_trunks st ON c.sip_trunk_id = st.id
-                    ORDER BY c.created_at DESC
-                    """
-                )
-                return [dict(r) for r in cur.fetchall()]
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaigns ORDER BY created_at DESC")
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            for k in ("id","agent_config_id","sip_trunk_id"):
+                if r.get(k): r[k] = str(r[k])
+            if r.get("created_at"):   r["created_at"]   = r["created_at"].isoformat()
+            if r.get("completed_at"): r["completed_at"] = r["completed_at"].isoformat()
+            if r.get("daily_start_time"): r["daily_start_time"] = str(r["daily_start_time"])
+            if r.get("daily_end_time"):   r["daily_end_time"]   = str(r["daily_end_time"])
+        return rows
     except Exception as e:
-        logger.error(f"[DB] fetch_campaigns failed: {e}")
+        logger.error(f"[DB] fetch_campaigns FAILED: {e}")
         return []
 
 
 def insert_campaign(data: dict) -> dict:
-    ALLOWED = [
-        "name", "agent_config_id", "sip_trunk_id", "max_calls_per_minute",
-        "max_retries_per_lead", "retry_delay_hours", "daily_start_time",
-        "daily_end_time", "timezone", "notes"
-    ]
-    filtered = {k: v for k, v in data.items() if k in ALLOWED and v is not None}
-    filtered["status"] = "draft"
-    cols = list(filtered.keys())
-    vals = list(filtered.values())
-    placeholders = ", ".join(["%s"] * len(cols))
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                f"INSERT INTO campaigns ({', '.join(cols)}) VALUES ({placeholders}) RETURNING *",
-                vals
-            )
-            row = dict(cur.fetchone())
-            conn.commit()
-    return row
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO campaigns
+                        (name, agent_config_id, sip_trunk_id,
+                         max_calls_per_minute, max_retries_per_lead,
+                         daily_start_time, daily_end_time, timezone, notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                """, (
+                    data.get("name",""), data.get("agent_config_id") or None,
+                    data.get("sip_trunk_id") or None,
+                    int(data.get("max_calls_per_minute",5)),
+                    int(data.get("max_retries_per_lead",2)),
+                    data.get("daily_start_time","09:30"),
+                    data.get("daily_end_time","19:30"),
+                    data.get("timezone","Asia/Kolkata"),
+                    data.get("notes",""),
+                ))
+                row = cur.fetchone()
+        return {"id": str(row[0]) if row else None}
+    except Exception as e:
+        logger.error(f"[DB] insert_campaign FAILED: {e}")
+        raise
 
 
 def update_campaign_status(campaign_id: str, status: str):
-    with get_conn() as conn:
+    with _get_conn() as conn:
         with conn.cursor() as cur:
-            if status == "completed":
-                cur.execute(
-                    "UPDATE campaigns SET status = %s, completed_at = NOW() WHERE id = %s",
-                    (status, campaign_id)
-                )
-            else:
-                cur.execute(
-                    "UPDATE campaigns SET status = %s WHERE id = %s",
-                    (status, campaign_id)
-                )
-            conn.commit()
+            cur.execute(
+                "UPDATE campaigns SET status=%s WHERE id=%s",
+                (status, campaign_id)
+            )
 
 
-def delete_campaign_by_id(campaign_id: str):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
-            cur.execute("DELETE FROM campaigns WHERE id = %s", (campaign_id,))
-            conn.commit()
-
-
-def fetch_campaign_leads(campaign_id: str, status: str = None, limit: int = 100, offset: int = 0) -> list:
+def fetch_campaign_leads(campaign_id: str, limit: int = 500) -> list:
     try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                if status:
-                    cur.execute(
-                        "SELECT * FROM campaign_leads WHERE campaign_id = %s AND status = %s "
-                        "ORDER BY created_at LIMIT %s OFFSET %s",
-                        (campaign_id, status, limit, offset)
-                    )
-                else:
-                    cur.execute(
-                        "SELECT * FROM campaign_leads WHERE campaign_id = %s "
-                        "ORDER BY created_at LIMIT %s OFFSET %s",
-                        (campaign_id, limit, offset)
-                    )
-                return [dict(r) for r in cur.fetchall()]
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM campaign_leads WHERE campaign_id=%s ORDER BY created_at LIMIT %s",
+                    (campaign_id, limit)
+                )
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            for k in ("id","campaign_id"):
+                if r.get(k): r[k] = str(r[k])
+            if r.get("created_at"):      r["created_at"]      = r["created_at"].isoformat()
+            if r.get("last_attempt_at"): r["last_attempt_at"] = r["last_attempt_at"].isoformat()
+        return rows
     except Exception as e:
-        logger.error(f"[DB] fetch_campaign_leads failed: {e}")
+        logger.error(f"[DB] fetch_campaign_leads FAILED: {e}")
         return []
 
 
 def insert_leads_bulk(campaign_id: str, leads: list) -> int:
     if not leads:
         return 0
-    rows_to_insert = []
-    for lead in leads:
-        phone = str(lead.get("phone", "")).strip()
-        if not phone:
-            continue
-        rows_to_insert.append((
-            campaign_id,
-            phone,
-            str(lead.get("name", "")),
-            str(lead.get("email", "")),
-            json.dumps(lead.get("custom_data", {})) if lead.get("custom_data") else "{}",
-        ))
-    if not rows_to_insert:
-        return 0
     try:
-        with get_conn() as conn:
+        with _get_conn() as conn:
             with conn.cursor() as cur:
                 from psycopg2.extras import execute_values
                 execute_values(
                     cur,
-                    "INSERT INTO campaign_leads (campaign_id, phone, name, email, custom_data) VALUES %s "
-                    "ON CONFLICT DO NOTHING",
-                    rows_to_insert
+                    "INSERT INTO campaign_leads (campaign_id, phone, name, email) VALUES %s ON CONFLICT DO NOTHING",
+                    [(campaign_id, l.get("phone",""), l.get("name",""), l.get("email","")) for l in leads],
                 )
-                count = cur.rowcount
+                # Update total_leads counter
                 cur.execute(
-                    "UPDATE campaigns SET total_leads = total_leads + %s WHERE id = %s",
-                    (count, campaign_id)
+                    "UPDATE campaigns SET total_leads = (SELECT COUNT(*) FROM campaign_leads WHERE campaign_id=%s) WHERE id=%s",
+                    (campaign_id, campaign_id)
                 )
-                conn.commit()
-        return count
+        return len(leads)
     except Exception as e:
-        logger.error(f"[DB] insert_leads_bulk failed: {e}")
-        return 0
+        logger.error(f"[DB] insert_leads_bulk FAILED: {e}")
+        raise
 
 
-def fetch_dnc(limit: int = 200, offset: int = 0) -> list:
+def fetch_dnc(limit: int = 500) -> list:
     try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT * FROM dnc_list ORDER BY created_at DESC LIMIT %s OFFSET %s",
-                    (limit, offset)
-                )
-                return [dict(r) for r in cur.fetchall()]
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM dnc_list ORDER BY created_at DESC LIMIT %s", (limit,))
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            if r.get("id"):         r["id"]         = str(r["id"])
+            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
+        return rows
     except Exception as e:
-        logger.error(f"[DB] fetch_dnc failed: {e}")
+        logger.error(f"[DB] fetch_dnc FAILED: {e}")
         return []
 
 
 def add_to_dnc(phone: str, reason: str = "manual", source: str = "dashboard"):
-    with get_conn() as conn:
+    with _get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO dnc_list (phone, reason, source) VALUES (%s, %s, %s) "
-                "ON CONFLICT (phone) DO UPDATE SET reason = EXCLUDED.reason",
+                "INSERT INTO dnc_list (phone, reason, source) VALUES (%s,%s,%s) ON CONFLICT (phone) DO NOTHING",
                 (phone, reason, source)
             )
-            conn.commit()
 
 
 def remove_from_dnc(phone: str):
-    with get_conn() as conn:
+    with _get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM dnc_list WHERE phone = %s", (phone,))
-            conn.commit()
+            cur.execute("DELETE FROM dnc_list WHERE phone=%s", (phone,))
+
+
+def is_on_dnc(phone: str) -> bool:
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM dnc_list WHERE phone=%s LIMIT 1", (phone,))
+                return cur.fetchone() is not None
+    except Exception:
+        return False
 
 
 def fetch_telephony_overview() -> dict:
     try:
-        from datetime import date
-        today = date.today().isoformat()
-        with get_conn() as conn:
+        with _get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM campaigns")
-                total_campaigns = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM campaigns WHERE status = 'active'")
-                active_campaigns = cur.fetchone()[0]
+                total = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM campaigns WHERE status='running'")
+                active = cur.fetchone()[0]
+                ist = pytz.timezone("Asia/Kolkata")
+                today = datetime.now(ist).date().isoformat()
                 cur.execute(
-                    "SELECT COUNT(*) FROM call_logs WHERE call_type = 'outbound' AND DATE(created_at) = %s",
+                    "SELECT COUNT(*) FROM call_logs WHERE call_date=%s AND call_type='outbound'",
                     (today,)
                 )
                 calls_today = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM dnc_list")
                 dnc_count = cur.fetchone()[0]
         return {
-            "total_campaigns": total_campaigns,
-            "active_campaigns": active_campaigns,
+            "total_campaigns": total,
+            "active_campaigns": active,
             "calls_today": calls_today,
             "dnc_count": dnc_count,
         }
     except Exception as e:
-        logger.error(f"[DB] fetch_telephony_overview failed: {e}")
-        return {"total_campaigns": 0, "active_campaigns": 0, "calls_today": 0, "dnc_count": 0}
+        logger.error(f"[DB] fetch_telephony_overview FAILED: {e}")
+        return {"total_campaigns":0,"active_campaigns":0,"calls_today":0,"dnc_count":0}
 
 
 def fetch_daily_analytics(days: int = 14) -> list:
-    from datetime import date, timedelta
-    results = []
     try:
-        with get_conn() as conn:
+        ist = pytz.timezone("Asia/Kolkata")
+        start = (datetime.now(ist) - timedelta(days=days)).date().isoformat()
+        with _get_conn() as conn:
             with conn.cursor() as cur:
-                for i in range(days - 1, -1, -1):
-                    d = (date.today() - timedelta(days=i)).isoformat()
-                    cur.execute(
-                        """
-                        SELECT
-                            COUNT(*) as total_calls,
-                            SUM(CASE WHEN call_type='outbound' THEN 1 ELSE 0 END) as outbound,
-                            SUM(CASE WHEN call_type='inbound'  THEN 1 ELSE 0 END) as inbound,
-                            SUM(CASE WHEN was_booked THEN 1 ELSE 0 END) as total_booked,
-                            SUM(CASE WHEN sentiment='positive' THEN 1 ELSE 0 END) as positive,
-                            SUM(CASE WHEN sentiment='negative' THEN 1 ELSE 0 END) as negative,
-                            COALESCE(AVG(duration), 0) as avg_duration_sec
-                        FROM call_logs
-                        WHERE DATE(created_at) = %s
-                        """,
-                        (d,)
-                    )
-                    row = cur.fetchone()
-                    results.append({
-                        "date":             d,
-                        "total_calls":      row[0] or 0,
-                        "outbound":         row[1] or 0,
-                        "inbound":          row[2] or 0,
-                        "total_booked":     row[3] or 0,
-                        "positive":         row[4] or 0,
-                        "negative":         row[5] or 0,
-                        "avg_duration_sec": round(float(row[6] or 0)),
-                    })
+                cur.execute("""
+                    SELECT call_date, COUNT(*) as total_calls, SUM(CASE WHEN was_booked THEN 1 ELSE 0 END) as booked
+                    FROM call_logs
+                    WHERE call_date >= %s
+                    GROUP BY call_date
+                    ORDER BY call_date
+                """, (start,))
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            if r.get("call_date"): r["call_date"] = str(r["call_date"])
+        return rows
     except Exception as e:
-        logger.error(f"[DB] fetch_daily_analytics failed: {e}")
-    return results
-
-
-import json
+        logger.error(f"[DB] fetch_daily_analytics FAILED: {e}")
+        return []

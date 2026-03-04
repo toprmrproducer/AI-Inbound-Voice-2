@@ -114,12 +114,6 @@ async def api_post_config(request: Request):
 
 @app.get("/api/logs")
 async def api_get_logs():
-    config = read_config()
-    # Prefer env vars (Coolify) over config.json
-    if not os.environ.get("SUPABASE_URL"):
-        os.environ["SUPABASE_URL"] = config.get("supabase_url", "")
-    if not os.environ.get("SUPABASE_KEY"):
-        os.environ["SUPABASE_KEY"] = config.get("supabase_key", "")
     import db
     try:
         logs = db.fetch_call_logs(limit=50)
@@ -154,7 +148,9 @@ async def api_get_transcript(log_id: str):
 async def api_get_bookings():
     import db
     try:
-        return db.fetch_bookings()
+        # fetch_bookings removed — filter call_logs by was_booked
+        rows = db.fetch_call_logs(limit=200)
+        return [r for r in rows if r.get("was_booked")]
     except Exception as e:
         logger.error(f"Error fetching bookings: {e}")
         return []
@@ -531,7 +527,10 @@ async def tel_delete_campaign(cid: str):
 @app.get("/api/telephony/campaigns/{cid}/leads")
 async def tel_get_leads(cid: str, status: str = None, limit: int = 100, offset: int = 0):
     import db
-    return db.fetch_campaign_leads(cid, status=status, limit=limit, offset=offset)
+    leads = db.fetch_campaign_leads(cid, limit=limit)
+    if status:
+        leads = [l for l in leads if l.get("status") == status]
+    return leads
 
 
 @app.post("/api/telephony/campaigns/{cid}/leads")
