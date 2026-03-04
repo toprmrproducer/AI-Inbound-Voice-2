@@ -288,39 +288,11 @@ class AgentAudioSession:
             pass
         self._speaking = False
 
-FILLERS_START = ["Umm,", "Acha,", "Dekhiye,", "Hmm,"]
-
-def maybe_add_starter(text: str) -> str:
-    if len(text.split()) < 8:
-        return text
-    if random.random() < 0.45:
-        filler = random.choice(FILLERS_START)
-        return f"{filler} {text}"
-    return text
-
-def soften_questions(text: str) -> str:
-    return re.sub(r"\?", "...?", text)
-
-def shorten_long_sentences(text: str) -> str:
-    if len(text.split()) > 22:
-        text = text.replace(" and ", ". And ")
-    return text
-
-def humanize_text(text: str) -> str:
-    text = text.strip()
-    if not text:
-        return text
-    text = shorten_long_sentences(text)
-    text = soften_questions(text)
-    text = maybe_add_starter(text)
-    return text
-
 async def safe_speak(session, text: str, **kwargs):
     """
     Wrapper around session.say() or AgentAudioSession that catches Sarvam WebSocket errors
-    so the job never dies from a TTS failure, and humanizes text before saying it.
+    so the job never dies from a TTS failure.
     """
-    text = humanize_text(text)
     if not text:
         return
     try:
@@ -917,20 +889,6 @@ async def entrypoint(ctx: JobContext):
     # ── Build agent ───────────────────────────────────────────────────────
     agent = OutboundAssistant(agent_tools=agent_tools, first_line=first_line, live_config=live_config)
 
-    # --- Interruption state tracking ---
-    global agent_is_speaking
-    agent_is_speaking = False
-
-
-    def before_tts_cb(agent_response: str) -> str:
-        """
-        Humanizes string and returns only the FIRST sentence to TTS.
-        Remaining sentences are queued as separate interruptible chunks.
-        """
-        agent_response = humanize_text(agent_response)
-        sentences = re.split(r'(?<=[।.!?])\s+', agent_response.strip())
-        return sentences[0] if sentences else agent_response
-
     # ── Start Sarvam-powered session (#1 #2 #3 #6) ────────────────────────
     _room_input_opts = RoomInputOptions(close_on_disconnect=False)
     if _nc is not None:
@@ -964,7 +922,6 @@ async def entrypoint(ctx: JobContext):
         min_endpointing_delay=delay_setting if delay_setting else 0.5,
         preemptive_generation=True,
         allow_interruptions=True,
-        before_tts_cb=before_tts_cb,
     )
 
     @session.on("user_speech_started")
