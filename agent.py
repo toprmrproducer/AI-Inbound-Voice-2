@@ -551,6 +551,8 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
 
     async def on_enter(self):
         # #28 — Dynamic greeting from config
+        # Use session.say() directly to guarantee TTS delivery of the opening line.
+        # generate_reply() only feeds context to the LLM and may not produce audio.
         greeting = (
             self._live_config.get("opening_greeting")
             or self._first_line
@@ -560,9 +562,7 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
                 "I can answer questions about our treatments or help you book an appointment."
             )
         )
-        await self.session.generate_reply(
-            instructions=f"Say exactly this greeting aloud: '{greeting}'"
-        )
+        await self.session.say(greeting, allow_interruptions=True)
 
 
 
@@ -980,10 +980,19 @@ async def entrypoint(ctx: JobContext):
             session.interrupt()
 
 
+    # ── Fix #2: Resolve SIP participant so STT subscribes to the correct audio track ──
+    sip_participant = None
+    for identity, participant in ctx.room.remote_participants.items():
+        if identity.startswith("sip_"):
+            sip_participant = participant
+            logger.info(f"[SIP] Binding session to SIP participant: {identity}")
+            break
+
     await session.start(
         room=ctx.room,
         agent=agent,
         room_input_options=_room_input_opts,
+        participant=sip_participant,  # Binds STT to the caller's audio track
     )
 
     # #12 — TTS pre-warming
@@ -1039,16 +1048,26 @@ async def entrypoint(ctx: JobContext):
     last_agent_speak_time = time.time()
 
     async def silence_watchdog():
-        """If caller goes quiet for 12s and agent hasn't spoken, send a nudge."""
+        """Nudge the caller after 20s of silence. Hang up after 2 unanswered nudges."""
         nonlocal last_agent_speak_time
+        nudge_count = 0
+        MAX_NUDGES = 2
+        SILENCE_THRESHOLD = 20  # seconds before first nudge
         while True:
-            await asyncio.sleep(3)
-            # Only trigger if the session is still active
-            if time.time() - last_agent_speak_time > 12:
-                logger.info("[WATCHDOG] 12s silence detected, sending nudge.")
-                await session.say("Are you still there? You can say 'ok' or ask another question.")
+            await asyncio.sleep(5)
+            if time.time() - last_agent_speak_time > SILENCE_THRESHOLD:
+                nudge_count += 1
+                if nudge_count >= MAX_NUDGES:
+                    logger.info("[WATCHDOG] Max nudges reached — hanging up.")
+                    await session.say("It seems you cannot hear me. I will end this call now. Goodbye!")
+                    await agent_tools.end_call()
+                    return
+                logger.info(f"[WATCHDOG] {SILENCE_THRESHOLD}s silence — nudge #{nudge_count}")
+                await session.say("Are you still there? You can speak anytime.")
                 last_agent_speak_time = time.time()
+                await asyncio.sleep(SILENCE_THRESHOLD)  # reset window after nudge
 
+    # Watchdog starts AFTER the greeting (on_enter will fire and update last_agent_speak_time)
     watchdog_task = asyncio.create_task(silence_watchdog())
 
     @session.on("agent_speech_started")

@@ -1,6 +1,6 @@
 # 🧠 RapidXAI Voice Agent — Complete Agent Knowledge Base
 
-> **Last Updated:** 2026-03-04  
+> **Last Updated:** 2026-03-04 (rev 2)  
 > **Purpose:** Complete time-machine context file. Give this to any new AI agent to instantly understand the full codebase, architecture, all bug history, all recent fixes, env variables, infra, and next steps.
 
 ---
@@ -420,6 +420,18 @@ Uses **Cal.com API v1/v2**:
 ### Bug #8 — `db.init_db()` not called in `ui_server.py` (2026-03-04)
 - **Problem:** The website dashboard started, hit `/api/agents`, but the `agents` table didn't exist yet because only `agent.py` called `init_db()` at startup.
 - **Fix:** Added `@app.on_event("startup")` in `ui_server.py` that calls `db.init_db()`.
+
+### Bug #9 — Greeting never sent to caller (2026-03-04 rev 2)
+- **Problem:** `OutboundAssistant.on_enter()` called `session.generate_reply()` with an instruction to "say the greeting aloud". This only injects a context message into the LLM but does **not** trigger TTS — so the caller heard nothing.
+- **Fix:** Replaced `generate_reply()` with `await self.session.say(greeting, allow_interruptions=True)` in `on_enter()`. This calls TTS directly and is the only reliable way to speak the opening line.
+
+### Bug #10 — STT never transcribed caller audio (2026-03-04 rev 2)
+- **Problem:** `session.start()` was called without a `participant=` argument. Without a specific participant, the AgentSession uses the agent's own audio track as input, so Sarvam STT never received the caller's audio. No `TRANSCRIPT Passing to LLM` log lines appeared.
+- **Fix:** Before `session.start()`, loop over `ctx.room.remote_participants` to find the participant whose identity starts with `"sip_"` (the SIP caller). Pass it as `participant=sip_participant` to `session.start()`. This subscribes Sarvam STT to the correct audio track.
+
+### Bug #11 — Watchdog spamming nudges at 12s intervals (2026-03-04 rev 2)
+- **Problem:** Watchdog fired every 3s poll with a 12s threshold, flooding the call with "Are you still there?" messages — masking the greeting and blocking normal conversation flow.
+- **Fix:** Increased threshold to 20s, nudge polling to 5s, added `nudge_count` tracking. After 2 unanswered nudges the agent says a farewell and calls `end_call()`. Watchdog now also sleeps for the full threshold period after each nudge to prevent repeat-firing.
 
 ---
 
