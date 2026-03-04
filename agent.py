@@ -150,21 +150,33 @@ def build_multilang_system_prompt(lang_code: str, base_instructions: str = "") -
     """Build a language-locked system prompt for the given detected language."""
     cfg = get_lang_config(lang_code)
     lang_name = cfg["name"]
-    core = f"""
-
-═══════════════════════════════════════════
+    
+    # If the user is speaking Hindi or English, teach the agent to use Hinglish (the most common Indian conversational style)
+    # If the user speaks Tamil/Telugu/etc, lock strictly into that language.
+    if lang_code in ("hi-IN", "en-IN"):
+        language_rule = """
+CRITICAL LANGUAGE RULE:
+You MUST speak in a natural "Hinglish" mix (Hindi and English).
+- When the user speaks Hindi, reply in Hindi but you can use English medical/spa terms.
+- When the user speaks English, reply in English but you can occasionally use a Hindi greeting.
+- Keep the tone warm and conversational.
+"""
+    else:
+        language_rule = f"""
 CRITICAL LANGUAGE RULE — NON-NEGOTIABLE:
 You MUST speak ONLY in {lang_name}.
-NEVER switch to Hindi, English, or any other language.
+NEVER switch to Hindi, English, or any other language unless there is absolutely no {lang_name} equivalent for a medical term (in which case use the English word only for that term).
 Even if the user mixes languages, ALWAYS reply in {lang_name}.
+"""
 
+    core = f"""
+
+═══════════════════════════════════════════{language_rule}
 CRITICAL RESPONSE FORMAT FOR VOICE:
 - NEVER generate more than ONE sentence at a time
 - Each response must be maximum 15 words
 - Do NOT use compound sentences joined by "and" or "but"
 - Short sentences = faster interruption for the user
-If a medical term has no {lang_name} equivalent, say it in English only for that word.
-Language: {lang_name} ONLY.
 ═══════════════════════════════════════════
 
 """
@@ -519,31 +531,36 @@ class AutoLanguageAgent(Agent):
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Fires after every user utterance. We detect language here."""
         if not self.language_locked:
-            detected = getattr(new_message, "language", None)
-            if not detected:
-                # Try nested transcript attribute
-                try:
-                    detected = new_message.content[0].language  # type: ignore[attr-defined]
-                except Exception:
-                    detected = None
-            if detected and detected not in ("unknown", "", None) and detected in LANGUAGE_CONFIG:
+            # Safely extract detected language from LiveKit STT speech data
+            detected = None
+            try:
+                # LiveKit exposes the SpeechData objects inside the ChatMessage metadata sometimes,
+                # or as an attribute on the message itself depending on the SDK version.
+                # The safest way is to just assume we check message.language or similar
+                detected = getattr(new_message, "language", None)
+            except Exception:
+                pass
+
+            if detected and detected != "unknown" and detected in LANGUAGE_CONFIG:
                 self.detected_language = detected
                 self.language_locked = True
-                logger.info(f"[LANG] Detected: {detected} ({get_lang_config(detected)['name']}) — locking in")
+                cfg = get_lang_config(detected)
+                logger.info("[LANG] Detected: %s (%s) — locking in", detected, cfg["name"])
+                
                 # Update system prompt to enforce the detected language
                 self.instructions = build_multilang_system_prompt(detected, self._base_instructions)
+                
                 # Swap TTS on the session if available
                 if self._session_ref is not None:
-                    cfg = get_lang_config(detected)
                     try:
                         self._session_ref._tts = sarvam.TTS(
                             model="bulbul:v3",
                             speaker=cfg["speaker"],
                             target_language_code=cfg["tts_lang"],
                         )
-                        logger.info(f"[LANG] TTS swapped to {cfg['name']} (speaker={cfg['speaker']})")
+                        logger.info("[LANG] TTS swapped to %s (speaker=%s)", cfg['name'], cfg['speaker'])
                     except Exception as e:
-                        logger.warning(f"[LANG] TTS swap failed: {e}")
+                        logger.warning("[LANG] TTS swap failed: %s", e)
         await super().on_user_turn_completed(turn_ctx, new_message)
 
 
