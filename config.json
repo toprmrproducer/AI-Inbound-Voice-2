@@ -16,7 +16,7 @@
     "vobiz_username": "",
     "vobiz_password": "",
     "vobiz_outbound_number": "",
-    "sip_trunk_id": "",
+    "sip_trunk_id": "ST_7HUFap76wdDT",
     "supabase_url": "https://yplraarslqarwuedzlfr.supabase.co",
     "supabase_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlwbHJhYXJzbHFhcnd1ZWR6bGZyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNjQwNjMsImV4cCI6MjA4Njg0MDA2M30.YDQsu_sc_QF4v6wpe8uW8u-OlvMludrnAqBdN8AMHoI",
     "first_line": "Namaste! Welcome to Daisy's Med Spa. Main aapki kaise madad kar sakta hoon — kya aap koi treatment ke baare mein jaanna chahte hain, ya appointment book karna chahenge?"
