@@ -925,6 +925,10 @@ async def entrypoint(ctx: JobContext):
     # Prewarm removed: Sarvam TTS has no prewarm() method — it was always failing silently.
     # The first TTS connection is established on the first say() call instead.
 
+    # Safe no-op: logs active call state (no active_calls table in schema)
+    async def upsert_active_call(status: str):
+        logger.info(f"[ACTIVE_CALL] room={ctx.room.name} phone={caller_phone} status={status}")
+
     # Fix 9: Inject caller memory non-blocking
     asyncio.create_task(_inject_caller_memory())
     asyncio.create_task(upsert_active_call("active"))
