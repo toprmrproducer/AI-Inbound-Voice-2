@@ -148,19 +148,15 @@ def get_sip_trunks() -> list:
 
 
 def create_sip_trunk(name, provider, sip_uri, username=None, password=None, caller_id_number=None) -> dict:
-    try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    INSERT INTO sip_trunks (name, provider, sip_uri, username, password, caller_id_number)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    RETURNING *
-                """, (name, provider, sip_uri, username, password, caller_id_number))
-                conn.commit()
-                return dict(cur.fetchone())
-    except Exception as e:
-        logger.error(f"[DB] create_sip_trunk failed: {e}")
-        return {}
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO sip_trunks (name, provider, sip_uri, username, password, caller_id_number)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING *
+            """, (name, provider, sip_uri, username, password, caller_id_number))
+            conn.commit()
+            return dict(cur.fetchone())
 
 
 def delete_sip_trunk(trunk_id: int) -> bool:
@@ -198,19 +194,15 @@ def get_active_agent() -> dict:
         return None
 
 def create_agent(agent_id, name, stt_language, tts_language, tts_voice, llm_model, first_line, agent_instructions) -> dict:
-    try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    INSERT INTO agents (id, name, stt_language, tts_language, tts_voice, llm_model, first_line, agent_instructions)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING *
-                """, (agent_id, name, stt_language, tts_language, tts_voice, llm_model, first_line, agent_instructions))
-                conn.commit()
-                return dict(cur.fetchone())
-    except Exception as e:
-        logger.error(f"[DB] create_agent failed: {e}")
-        return {}
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO agents (id, name, stt_language, tts_language, tts_voice, llm_model, first_line, agent_instructions)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING *
+            """, (agent_id, name, stt_language, tts_language, tts_voice, llm_model, first_line, agent_instructions))
+            conn.commit()
+            return dict(cur.fetchone())
 
 def update_agent(agent_id, data: dict) -> bool:
     allowed_fields = ["name", "stt_language", "tts_language", "tts_voice", "llm_model", "first_line", "agent_instructions"]

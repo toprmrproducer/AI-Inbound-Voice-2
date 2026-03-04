@@ -374,10 +374,11 @@ async def api_create_sip_trunk(request: Request):
     if not name or not provider or not sip_uri:
         raise HTTPException(400, "name, provider, and sip_uri are required")
     import db
-    trunk = db.create_sip_trunk(name, provider, sip_uri, username, password, caller_id_number)
-    if not trunk:
-        raise HTTPException(500, "Failed to create SIP trunk")
-    return trunk
+    try:
+        trunk = db.create_sip_trunk(name, provider, sip_uri, username, password, caller_id_number)
+        return trunk
+    except Exception as e:
+        raise HTTPException(500, f"Failed to create SIP trunk: {str(e)}")
 
 @app.delete("/api/sip-trunks/{trunk_id}")
 async def api_delete_sip_trunk(trunk_id: int):
@@ -824,17 +825,20 @@ async def api_agents_list():
 @app.post("/api/agents")
 async def api_agents_create(request: Request):
     data = await request.json()
-    agent = db.create_agent(
-        agent_id=str(uuid.uuid4())[:8],
-        name=data.get("name", "New Agent"),
-        stt_language=data.get("stt_language", "hi-IN"),
-        tts_language=data.get("tts_language", "hi-IN"),
-        tts_voice=data.get("tts_voice", "rohan"),
-        llm_model=data.get("llm_model", "gpt-4o-mini"),
-        first_line=data.get("first_line", ""),
-        agent_instructions=data.get("agent_instructions", "")
-    )
-    return agent
+    try:
+        agent = db.create_agent(
+            agent_id=str(uuid.uuid4())[:8],
+            name=data.get("name", "New Agent"),
+            stt_language=data.get("stt_language", "hi-IN"),
+            tts_language=data.get("tts_language", "hi-IN"),
+            tts_voice=data.get("tts_voice", "rohan"),
+            llm_model=data.get("llm_model", "gpt-4o-mini"),
+            first_line=data.get("first_line", ""),
+            agent_instructions=data.get("agent_instructions", "")
+        )
+        return agent
+    except Exception as e:
+        raise HTTPException(500, f"Failed to create agent: {str(e)}")
 
 @app.put("/api/agents/{agent_id}")
 async def api_agents_update(agent_id: str, request: Request):
