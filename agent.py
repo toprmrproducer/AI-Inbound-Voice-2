@@ -687,6 +687,8 @@ async def run_demo_session(ctx: JobContext):
             model="saaras:v3", 
             language="unknown", 
             mode="transcribe",
+            high_vad_sensitivity=True,
+            sample_rate=16000,
             flush_signal=True,
         ),
         llm=openai.LLM(model=llm_model),
@@ -892,6 +894,8 @@ async def entrypoint(ctx: JobContext):
             language="unknown",   # auto-detect via Saaras v3
             model="saaras:v3",
             mode="transcribe",    # transcribe preserves original language for detection
+            high_vad_sensitivity=True,
+            sample_rate=16000,
             flush_signal=True,
         )
 
