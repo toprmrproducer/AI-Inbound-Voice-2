@@ -38,156 +38,197 @@ def get_conn():
 
 
 
-def init_db():
-    with get_conn() as conn:
+def _exec_ddl(conn, sql: str, label: str = ""):
+    """Execute a single DDL statement, log errors but don't raise."""
+    try:
         with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS call_logs (
-                    id SERIAL PRIMARY KEY,
-                    phone TEXT,
-                    duration INTEGER,
-                    transcript TEXT,
-                    summary TEXT,
-                    recording_url TEXT,
-                    sentiment TEXT,
-                    estimated_cost_usd NUMERIC(10,5),
-                    call_date DATE,
-                    call_hour INTEGER,
-                    call_day_of_week TEXT,
-                    was_booked BOOLEAN DEFAULT FALSE,
-                    interrupt_count INTEGER DEFAULT 0,
-                    stt_provider TEXT,
-                    tts_provider TEXT,
-                    audio_codec TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
-                CREATE TABLE IF NOT EXISTS call_transcripts (
-                    id SERIAL PRIMARY KEY,
-                    call_room_id TEXT NOT NULL,
-                    phone TEXT,
-                    role TEXT CHECK (role IN ('user', 'assistant')),
-                    content TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
-                CREATE TABLE IF NOT EXISTS demo_links (
-                    id SERIAL PRIMARY KEY,
-                    slug TEXT UNIQUE NOT NULL,
-                    label TEXT,
-                    language TEXT DEFAULT 'auto',
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    is_active BOOLEAN DEFAULT TRUE,
-                    total_sessions INTEGER DEFAULT 0
-                );
-                -- ── Mass Calling Infrastructure Tables ──────────────────────
-                CREATE TABLE IF NOT EXISTS sip_trunks (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    name TEXT NOT NULL,
-                    provider TEXT NOT NULL DEFAULT 'vobiz',
-                    trunk_type TEXT NOT NULL DEFAULT 'outbound',
-                    sip_address TEXT NOT NULL DEFAULT '',
-                    auth_username TEXT DEFAULT '',
-                    auth_password TEXT DEFAULT '',
-                    number_pool JSONB DEFAULT '[]'::JSONB,
-                    livekit_trunk_id TEXT DEFAULT '',
-                    max_concurrent_calls INT DEFAULT 10,
-                    max_calls_per_number_per_day INT DEFAULT 150,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    notes TEXT DEFAULT ''
-                );
-                CREATE TABLE IF NOT EXISTS voice_agent_configs (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    name TEXT NOT NULL,
-                    preset_type TEXT NOT NULL DEFAULT 'custom',
-                    sip_trunk_id UUID REFERENCES sip_trunks(id) ON DELETE SET NULL,
-                    cli_override TEXT DEFAULT '',
-                    llm_model TEXT DEFAULT 'gpt-4o-mini',
-                    llm_provider TEXT DEFAULT 'openai',
-                    tts_provider TEXT DEFAULT 'sarvam',
-                    tts_voice TEXT DEFAULT 'rohan',
-                    tts_language TEXT DEFAULT 'hi-IN',
-                    stt_provider TEXT DEFAULT 'sarvam',
-                    stt_language TEXT DEFAULT 'hi-IN',
-                    agent_instructions TEXT DEFAULT '',
-                    first_line TEXT DEFAULT '',
-                    max_call_duration_seconds INT DEFAULT 300,
-                    max_turns INT DEFAULT 25,
-                    call_window_start TIME DEFAULT '09:30',
-                    call_window_end TIME DEFAULT '19:30',
-                    timezone TEXT DEFAULT 'Asia/Kolkata',
-                    is_active BOOLEAN DEFAULT TRUE
-                );
-                CREATE TABLE IF NOT EXISTS campaigns (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    name TEXT NOT NULL,
-                    status TEXT DEFAULT 'draft',
-                    agent_config_id UUID REFERENCES voice_agent_configs(id) ON DELETE SET NULL,
-                    sip_trunk_id UUID REFERENCES sip_trunks(id) ON DELETE SET NULL,
-                    max_calls_per_minute INT DEFAULT 5,
-                    max_retries_per_lead INT DEFAULT 2,
-                    retry_delay_hours INT DEFAULT 4,
-                    daily_start_time TIME DEFAULT '09:30',
-                    daily_end_time TIME DEFAULT '19:30',
-                    timezone TEXT DEFAULT 'Asia/Kolkata',
-                    total_leads INT DEFAULT 0,
-                    called_count INT DEFAULT 0,
-                    answered_count INT DEFAULT 0,
-                    booked_count INT DEFAULT 0,
-                    notes TEXT DEFAULT '',
-                    completed_at TIMESTAMPTZ
-                );
-                CREATE TABLE IF NOT EXISTS campaign_leads (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
-                    phone TEXT NOT NULL,
-                    name TEXT DEFAULT '',
-                    email TEXT DEFAULT '',
-                    custom_data JSONB DEFAULT '{}'::JSONB,
-                    status TEXT DEFAULT 'pending',
-                    attempts INT DEFAULT 0,
-                    last_attempt_at TIMESTAMPTZ,
-                    last_result TEXT DEFAULT '',
-                    livekit_room_id TEXT DEFAULT '',
-                    call_duration_seconds INT DEFAULT 0,
-                    booked BOOLEAN DEFAULT FALSE,
-                    notes TEXT DEFAULT ''
-                );
-                CREATE TABLE IF NOT EXISTS dnc_list (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    phone TEXT UNIQUE NOT NULL,
-                    reason TEXT DEFAULT 'manual',
-                    source TEXT DEFAULT 'dashboard'
-                );
-                -- ── Safe migrations for existing tables ─────────────────────
-                ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto';
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS campaign_id UUID;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS agent_config_id UUID;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS cli_used TEXT DEFAULT '';
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_type TEXT DEFAULT 'inbound';
-                -- ── Performance indexes ──────────────────────────────────────
-                CREATE INDEX IF NOT EXISTS idx_call_transcripts_room
-                    ON call_transcripts (call_room_id);
-                CREATE INDEX IF NOT EXISTS idx_call_logs_phone
-                    ON call_logs (phone);
-                CREATE INDEX IF NOT EXISTS idx_call_logs_created
-                    ON call_logs (created_at);
-                CREATE INDEX IF NOT EXISTS idx_demo_links_slug
-                    ON demo_links (slug);
-                CREATE INDEX IF NOT EXISTS idx_leads_campaign_status
-                    ON campaign_leads (campaign_id, status);
-                CREATE INDEX IF NOT EXISTS idx_leads_phone
-                    ON campaign_leads (phone);
-                CREATE INDEX IF NOT EXISTS idx_call_logs_campaign
-                    ON call_logs (campaign_id);
-                CREATE INDEX IF NOT EXISTS idx_dnc_phone
-                    ON dnc_list (phone);
-            """)
-            conn.commit()
+            cur.execute(sql)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.warning(f"[DB] DDL '{label}' skipped: {e}")
+
+
+def init_db():
+    """Create all tables and run migrations. Each statement is committed separately."""
+    conn = get_conn()
+    try:
+        # ── Core tables ──────────────────────────────────────────────────────
+        _exec_ddl(conn, """
+            CREATE TABLE IF NOT EXISTS call_logs (
+                id SERIAL PRIMARY KEY,
+                phone TEXT,
+                caller_name TEXT,
+                duration INTEGER,
+                transcript TEXT,
+                summary TEXT,
+                recording_url TEXT,
+                sentiment TEXT,
+                estimated_cost_usd NUMERIC(10,5),
+                call_date DATE,
+                call_hour INTEGER,
+                call_day_of_week TEXT,
+                was_booked BOOLEAN DEFAULT FALSE,
+                interrupt_count INTEGER DEFAULT 0,
+                stt_provider TEXT,
+                tts_provider TEXT,
+                audio_codec TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """, "create call_logs")
+
+        _exec_ddl(conn, """
+            CREATE TABLE IF NOT EXISTS call_transcripts (
+                id SERIAL PRIMARY KEY,
+                call_room_id TEXT NOT NULL,
+                phone TEXT,
+                role TEXT CHECK (role IN ('user', 'assistant')),
+                content TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """, "create call_transcripts")
+
+        _exec_ddl(conn, """
+            CREATE TABLE IF NOT EXISTS demo_links (
+                id SERIAL PRIMARY KEY,
+                slug TEXT UNIQUE NOT NULL,
+                label TEXT,
+                language TEXT DEFAULT 'auto',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                is_active BOOLEAN DEFAULT TRUE,
+                total_sessions INTEGER DEFAULT 0
+            )
+        """, "create demo_links")
+
+        # ── Mass calling tables ───────────────────────────────────────────────
+        _exec_ddl(conn, """
+            CREATE TABLE IF NOT EXISTS sip_trunks (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'vobiz',
+                trunk_type TEXT NOT NULL DEFAULT 'outbound',
+                sip_address TEXT NOT NULL DEFAULT '',
+                auth_username TEXT DEFAULT '',
+                auth_password TEXT DEFAULT '',
+                number_pool JSONB DEFAULT '[]'::JSONB,
+                livekit_trunk_id TEXT DEFAULT '',
+                max_concurrent_calls INT DEFAULT 10,
+                max_calls_per_number_per_day INT DEFAULT 150,
+                is_active BOOLEAN DEFAULT TRUE,
+                notes TEXT DEFAULT ''
+            )
+        """, "create sip_trunks")
+
+        _exec_ddl(conn, """
+            CREATE TABLE IF NOT EXISTS voice_agent_configs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                name TEXT NOT NULL,
+                preset_type TEXT NOT NULL DEFAULT 'custom',
+                sip_trunk_id UUID REFERENCES sip_trunks(id) ON DELETE SET NULL,
+                cli_override TEXT DEFAULT '',
+                llm_model TEXT DEFAULT 'gpt-4o-mini',
+                llm_provider TEXT DEFAULT 'openai',
+                tts_provider TEXT DEFAULT 'sarvam',
+                tts_voice TEXT DEFAULT 'rohan',
+                tts_language TEXT DEFAULT 'hi-IN',
+                stt_provider TEXT DEFAULT 'sarvam',
+                stt_language TEXT DEFAULT 'hi-IN',
+                agent_instructions TEXT DEFAULT '',
+                first_line TEXT DEFAULT '',
+                max_call_duration_seconds INT DEFAULT 300,
+                max_turns INT DEFAULT 25,
+                call_window_start TIME DEFAULT '09:30',
+                call_window_end TIME DEFAULT '19:30',
+                timezone TEXT DEFAULT 'Asia/Kolkata',
+                is_active BOOLEAN DEFAULT TRUE
+            )
+        """, "create voice_agent_configs")
+
+        _exec_ddl(conn, """
+            CREATE TABLE IF NOT EXISTS campaigns (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                name TEXT NOT NULL,
+                status TEXT DEFAULT 'draft',
+                agent_config_id UUID REFERENCES voice_agent_configs(id) ON DELETE SET NULL,
+                sip_trunk_id UUID REFERENCES sip_trunks(id) ON DELETE SET NULL,
+                max_calls_per_minute INT DEFAULT 5,
+                max_retries_per_lead INT DEFAULT 2,
+                retry_delay_hours INT DEFAULT 4,
+                daily_start_time TIME DEFAULT '09:30',
+                daily_end_time TIME DEFAULT '19:30',
+                timezone TEXT DEFAULT 'Asia/Kolkata',
+                total_leads INT DEFAULT 0,
+                called_count INT DEFAULT 0,
+                answered_count INT DEFAULT 0,
+                booked_count INT DEFAULT 0,
+                notes TEXT DEFAULT '',
+                completed_at TIMESTAMPTZ
+            )
+        """, "create campaigns")
+
+        _exec_ddl(conn, """
+            CREATE TABLE IF NOT EXISTS campaign_leads (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
+                phone TEXT NOT NULL,
+                name TEXT DEFAULT '',
+                email TEXT DEFAULT '',
+                custom_data JSONB DEFAULT '{}'::JSONB,
+                status TEXT DEFAULT 'pending',
+                attempts INT DEFAULT 0,
+                last_attempt_at TIMESTAMPTZ,
+                last_result TEXT DEFAULT '',
+                livekit_room_id TEXT DEFAULT '',
+                call_duration_seconds INT DEFAULT 0,
+                booked BOOLEAN DEFAULT FALSE,
+                notes TEXT DEFAULT ''
+            )
+        """, "create campaign_leads")
+
+        _exec_ddl(conn, """
+            CREATE TABLE IF NOT EXISTS dnc_list (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                phone TEXT UNIQUE NOT NULL,
+                reason TEXT DEFAULT 'manual',
+                source TEXT DEFAULT 'dashboard'
+            )
+        """, "create dnc_list")
+
+        # ── Safe column migrations (ADD COLUMN IF NOT EXISTS) ────────────────
+        for col_sql, label in [
+            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS caller_name TEXT", "add caller_name"),
+            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS campaign_id UUID", "add campaign_id"),
+            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS agent_config_id UUID", "add agent_config_id"),
+            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS cli_used TEXT DEFAULT ''", "add cli_used"),
+            ("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_type TEXT DEFAULT 'inbound'", "add call_type"),
+            ("ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto'", "add demo_links.language"),
+        ]:
+            _exec_ddl(conn, col_sql, label)
+
+        # ── Indexes (IF NOT EXISTS — safe) ───────────────────────────────────
+        for idx_sql, label in [
+            ("CREATE INDEX IF NOT EXISTS idx_call_transcripts_room ON call_transcripts (call_room_id)", "idx_transcripts_room"),
+            ("CREATE INDEX IF NOT EXISTS idx_call_logs_phone ON call_logs (phone)", "idx_logs_phone"),
+            ("CREATE INDEX IF NOT EXISTS idx_call_logs_created ON call_logs (created_at)", "idx_logs_created"),
+            ("CREATE INDEX IF NOT EXISTS idx_demo_links_slug ON demo_links (slug)", "idx_demo_slug"),
+            ("CREATE INDEX IF NOT EXISTS idx_leads_campaign_status ON campaign_leads (campaign_id, status)", "idx_leads_status"),
+            ("CREATE INDEX IF NOT EXISTS idx_leads_phone ON campaign_leads (phone)", "idx_leads_phone"),
+            ("CREATE INDEX IF NOT EXISTS idx_call_logs_campaign ON call_logs (campaign_id)", "idx_logs_campaign"),
+            ("CREATE INDEX IF NOT EXISTS idx_dnc_phone ON dnc_list (phone)", "idx_dnc_phone"),
+        ]:
+            _exec_ddl(conn, idx_sql, label)
+
+    finally:
+        conn.close()
+
     logger.info("[DB] Tables initialized successfully")
+
+
 
 
 
