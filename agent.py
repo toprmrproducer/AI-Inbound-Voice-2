@@ -744,6 +744,13 @@ async def run_demo_session(ctx: JobContext):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def entrypoint(ctx: JobContext):
+    # ── Ensure DB schema exists in this worker process ─────────────────────────────
+    try:
+        from db import init_db as _init_db
+        _init_db()
+    except Exception as _dbe:
+        logger.warning(f"[DB] init_db in entrypoint failed (non-critical): {_dbe}")
+
     logger.info(f"[JOB] id={ctx.job.id}")
     logger.info(f"[JOB] raw metadata='{ctx.job.metadata}'")
 
@@ -1019,7 +1026,8 @@ async def entrypoint(ctx: JobContext):
         room=ctx.room,
         agent=agent,
         room_input_options=_room_input_opts,
-        participant=sip_participant,  # Binds STT to the caller's audio track
+        # NOTE: participant= kwarg not supported in this version of livekit-agents.
+        # The session auto-subscribes to all room participants (incl. SIP caller).
     )
 
     # #12 — TTS pre-warming
