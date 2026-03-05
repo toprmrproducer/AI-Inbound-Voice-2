@@ -16,7 +16,22 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ui-server")
 
-app = FastAPI(title="Med Spa AI Dashboard")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app):
+    """Run init_db() on startup so all tables exist before the first request."""
+    try:
+        import db
+        db.init_db()
+        logger.info("[STARTUP] ✅ Database schema initialised")
+    except Exception as e:
+        logger.error(f"[STARTUP] ❌ init_db failed: {e}")
+        # Don't abort — server can still serve routes that don't need the DB
+    yield  # app is running
+    # (shutdown cleanup here if needed)
+
+app = FastAPI(title="Med Spa AI Dashboard", lifespan=lifespan)
 
 # ── WebSocket Connection Manager ──────────────────────────────────────────────
 class ConnectionManager:
