@@ -457,7 +457,11 @@ async def websocket_calls(websocket: WebSocket):
 @app.get("/api/campaigns")
 async def api_get_campaigns():
     import db
-    return {"campaigns": db.get_campaigns()}
+    try:
+        return {"campaigns": db.get_campaigns()}
+    except Exception as e:
+        logger.error(f"[API] GET /api/campaigns failed: {e}")
+        return {"campaigns": []}
 
 @app.get("/api/campaigns/{campaign_id}")
 async def api_get_campaign(campaign_id: int):
@@ -987,21 +991,35 @@ import db
 
 @app.get("/api/agents")
 async def api_agents_list():
-    agents = db.get_agents()
-    if not agents:
-        cfg = read_config()
-        db.create_agent(
-            agent_id="default",
-            name="Daisy — Med Spa (Default)",
-            stt_language=cfg.get("stt_language", "hi-IN"),
-            tts_language=cfg.get("tts_language", "hi-IN"),
-            tts_voice=cfg.get("tts_voice", "rohan"),
-            llm_model=cfg.get("llm_model", "gpt-4o-mini"),
-            first_line=cfg.get("first_line", ""),
-            agent_instructions=cfg.get("agent_instructions", "")
-        )
-        db.activate_agent("default")
+    try:
         agents = db.get_agents()
+    except Exception as e:
+        logger.error(f"[API] GET /api/agents — db.get_agents() failed: {e}")
+        return []
+
+    if not agents:
+        # Auto-seed one default agent on first run (safe UUID, reads from config)
+        try:
+            cfg = read_config()
+            db.create_agent(
+                agent_id=str(uuid.uuid4()),
+                name="Daisy — Med Spa (Default)",
+                stt_language=cfg.get("stt_language", "hi-IN"),
+                tts_language=cfg.get("tts_language", "hi-IN"),
+                tts_voice=cfg.get("tts_voice", "rohan"),
+                llm_model=cfg.get("llm_model", "gpt-4o-mini"),
+                first_line=cfg.get("first_line", ""),
+                agent_instructions=cfg.get("agent_instructions", "")
+            )
+            # Activate the first (and only) agent
+            all_agents = db.get_agents()
+            if all_agents:
+                db.activate_agent(all_agents[0]["id"])
+            agents = db.get_agents()
+        except Exception as e:
+            logger.error(f"[API] GET /api/agents — auto-seed failed: {e}")
+            return []
+
     return agents
 
 @app.post("/api/agents")
