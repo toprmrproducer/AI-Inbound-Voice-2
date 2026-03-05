@@ -14,197 +14,212 @@ def get_conn():
 
 
 def init_db():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            # ── 1. Core tables (CREATE IF NOT EXISTS) ────────────────────────
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS call_logs (
-                    id SERIAL PRIMARY KEY,
-                    phone TEXT,
-                    duration INTEGER,
-                    transcript TEXT,
-                    summary TEXT,
-                    recording_url TEXT,
-                    sentiment TEXT,
-                    estimated_cost_usd NUMERIC(10,5),
-                    call_date DATE,
-                    call_hour INTEGER,
-                    call_day_of_week TEXT,
-                    was_booked BOOLEAN DEFAULT FALSE,
-                    interrupt_count INTEGER DEFAULT 0,
-                    stt_provider TEXT,
-                    tts_provider TEXT,
-                    audio_codec TEXT,
-                    caller_name TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
+    try:
+        conn = get_conn()
+    except Exception as e:
+        logger.error(f"[DB] init_db: Cannot connect to database: {e}")
+        raise
 
-                CREATE TABLE IF NOT EXISTS call_transcripts (
-                    id SERIAL PRIMARY KEY,
-                    call_room_id TEXT NOT NULL,
-                    phone TEXT,
-                    role TEXT CHECK (role IN ('user', 'assistant')),
-                    content TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
+    try:
+        cur = conn.cursor()
 
-                CREATE TABLE IF NOT EXISTS demo_links (
-                    id SERIAL PRIMARY KEY,
-                    slug TEXT UNIQUE NOT NULL,
-                    label TEXT,
-                    language TEXT DEFAULT 'auto',
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    is_active BOOLEAN DEFAULT TRUE,
-                    total_sessions INTEGER DEFAULT 0
-                );
+        # Enable uuid-ossp extension (needed for gen_random_uuid() on older Postgres)
+        cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
 
-                CREATE TABLE IF NOT EXISTS call_dnc (
-                    phone TEXT PRIMARY KEY,
-                    reason TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
+        # ── 1. Core tables (CREATE IF NOT EXISTS) ──────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS call_logs (
+                id SERIAL PRIMARY KEY,
+                phone TEXT,
+                duration INTEGER,
+                transcript TEXT,
+                summary TEXT,
+                recording_url TEXT,
+                sentiment TEXT,
+                estimated_cost_usd NUMERIC(10,5),
+                call_date DATE,
+                call_hour INTEGER,
+                call_day_of_week TEXT,
+                was_booked BOOLEAN DEFAULT FALSE,
+                interrupt_count INTEGER DEFAULT 0,
+                stt_provider TEXT,
+                tts_provider TEXT,
+                audio_codec TEXT,
+                caller_name TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
 
-                CREATE TABLE IF NOT EXISTS sip_trunks (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    provider TEXT NOT NULL DEFAULT 'vobiz',
-                    sip_uri TEXT NOT NULL DEFAULT '',
-                    username TEXT,
-                    password TEXT,
-                    caller_id_number TEXT,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
+            CREATE TABLE IF NOT EXISTS call_transcripts (
+                id SERIAL PRIMARY KEY,
+                call_room_id TEXT NOT NULL,
+                phone TEXT,
+                role TEXT CHECK (role IN ('user', 'assistant')),
+                content TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
 
-                CREATE TABLE IF NOT EXISTS agents (
-                    id UUID PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    is_active BOOLEAN DEFAULT FALSE,
-                    stt_provider TEXT DEFAULT 'sarvam',
-                    stt_language TEXT DEFAULT 'hi-IN',
-                    llm_provider TEXT DEFAULT 'openai',
-                    llm_model TEXT DEFAULT 'gpt-4o-mini',
-                    tts_provider TEXT DEFAULT 'sarvam',
-                    tts_voice TEXT DEFAULT 'rohan',
-                    tts_language TEXT DEFAULT 'hi-IN',
-                    first_line TEXT,
-                    system_prompt TEXT,
-                    agent_instructions TEXT,
-                    max_turns INTEGER DEFAULT 20,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
+            CREATE TABLE IF NOT EXISTS demo_links (
+                id SERIAL PRIMARY KEY,
+                slug TEXT UNIQUE NOT NULL,
+                label TEXT,
+                language TEXT DEFAULT 'auto',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                is_active BOOLEAN DEFAULT TRUE,
+                total_sessions INTEGER DEFAULT 0
+            );
 
-                CREATE TABLE IF NOT EXISTS campaigns (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'draft',
-                    phone_numbers TEXT NOT NULL DEFAULT '',
-                    agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
-                    sip_trunk_id INTEGER REFERENCES sip_trunks(id) ON DELETE SET NULL,
-                    calls_per_minute INTEGER DEFAULT 5,
-                    max_concurrent_calls INTEGER DEFAULT 5,
-                    retry_failed BOOLEAN DEFAULT TRUE,
-                    max_retries INTEGER DEFAULT 2,
-                    notes TEXT,
-                    started_at TIMESTAMPTZ,
-                    completed_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
+            CREATE TABLE IF NOT EXISTS call_dnc (
+                phone TEXT PRIMARY KEY,
+                reason TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
 
-                CREATE TABLE IF NOT EXISTS campaign_targets (
-                    id SERIAL PRIMARY KEY,
-                    campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
-                    phone TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    attempts INTEGER DEFAULT 0,
-                    last_attempt_at TIMESTAMPTZ,
-                    scheduled_time TIMESTAMPTZ
-                );
+            CREATE TABLE IF NOT EXISTS sip_trunks (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'vobiz',
+                sip_uri TEXT NOT NULL DEFAULT '',
+                username TEXT,
+                password TEXT,
+                caller_id_number TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
 
-                CREATE TABLE IF NOT EXISTS leads (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
-                    phone TEXT NOT NULL,
-                    name TEXT,
-                    email TEXT,
-                    custom_data JSONB,
-                    status TEXT DEFAULT 'pending',
-                    call_attempts INTEGER DEFAULT 0,
-                    last_call_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
+            CREATE TABLE IF NOT EXISTS agents (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                name TEXT NOT NULL,
+                is_active BOOLEAN DEFAULT FALSE,
+                stt_provider TEXT DEFAULT 'sarvam',
+                stt_language TEXT DEFAULT 'hi-IN',
+                llm_provider TEXT DEFAULT 'openai',
+                llm_model TEXT DEFAULT 'gpt-4o-mini',
+                tts_provider TEXT DEFAULT 'sarvam',
+                tts_voice TEXT DEFAULT 'rohan',
+                tts_language TEXT DEFAULT 'hi-IN',
+                first_line TEXT,
+                system_prompt TEXT,
+                agent_instructions TEXT,
+                max_turns INTEGER DEFAULT 20,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
 
-                CREATE TABLE IF NOT EXISTS bookings (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    call_room_id TEXT,
-                    caller_name TEXT,
-                    caller_phone TEXT,
-                    caller_email TEXT,
-                    start_time TIMESTAMPTZ NOT NULL,
-                    notes TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
-            """)
+            CREATE TABLE IF NOT EXISTS campaigns (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                phone_numbers TEXT NOT NULL DEFAULT '',
+                agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+                sip_trunk_id INTEGER REFERENCES sip_trunks(id) ON DELETE SET NULL,
+                calls_per_minute INTEGER DEFAULT 5,
+                max_concurrent_calls INTEGER DEFAULT 5,
+                retry_failed BOOLEAN DEFAULT TRUE,
+                max_retries INTEGER DEFAULT 2,
+                notes TEXT,
+                started_at TIMESTAMPTZ,
+                completed_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
 
-            # ── 2. Indexes ────────────────────────────────────────────────────
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_call_logs_phone ON call_logs (phone);
-                CREATE INDEX IF NOT EXISTS idx_call_logs_created ON call_logs (created_at);
-                CREATE INDEX IF NOT EXISTS idx_demo_links_slug ON demo_links (slug);
-                CREATE INDEX IF NOT EXISTS idx_leads_campaign_status ON leads (campaign_id, status);
-                CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads (phone);
-                CREATE INDEX IF NOT EXISTS idx_bookings_phone ON bookings (caller_phone);
-            """)
+            CREATE TABLE IF NOT EXISTS campaign_targets (
+                id SERIAL PRIMARY KEY,
+                campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+                phone TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER DEFAULT 0,
+                last_attempt_at TIMESTAMPTZ,
+                scheduled_time TIMESTAMPTZ
+            );
 
-            # ── 3. Safe migrations (ALTER IF NOT EXISTS) ──────────────────────
-            cur.execute("""
-                -- call_logs new columns
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS audio_codec TEXT;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS stt_provider TEXT;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS tts_provider TEXT;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS estimated_cost_usd NUMERIC(10,5);
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_hour INTEGER;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_day_of_week TEXT;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS interrupt_count INTEGER DEFAULT 0;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS caller_name TEXT;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS campaign_id INTEGER;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS lead_id UUID;
-                ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS room_id TEXT;
+            CREATE TABLE IF NOT EXISTS leads (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+                phone TEXT NOT NULL,
+                name TEXT,
+                email TEXT,
+                custom_data JSONB,
+                status TEXT DEFAULT 'pending',
+                call_attempts INTEGER DEFAULT 0,
+                last_call_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
 
-                -- sip_trunks columns
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS sip_uri TEXT;
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS username TEXT;
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS password TEXT;
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS caller_id_number TEXT;
-                ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+            CREATE TABLE IF NOT EXISTS bookings (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                call_room_id TEXT,
+                caller_name TEXT,
+                caller_phone TEXT,
+                caller_email TEXT,
+                start_time TIMESTAMPTZ,
+                notes TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
 
-                -- campaigns new columns
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS phone_numbers TEXT DEFAULT '';
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sip_trunk_id INTEGER;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_concurrent_calls INTEGER DEFAULT 5;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS notes TEXT;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS agent_id UUID;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS calls_per_minute INTEGER DEFAULT 5;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS retry_failed BOOLEAN DEFAULT TRUE;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_retries INTEGER DEFAULT 2;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
-                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+        # ── 2. Indexes ──────────────────────────────────────────────────────────
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_call_logs_phone ON call_logs (phone);
+            CREATE INDEX IF NOT EXISTS idx_call_logs_created ON call_logs (created_at);
+            CREATE INDEX IF NOT EXISTS idx_demo_links_slug ON demo_links (slug);
+            CREATE INDEX IF NOT EXISTS idx_leads_campaign_status ON leads (campaign_id, status);
+            CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads (phone);
+            CREATE INDEX IF NOT EXISTS idx_bookings_phone ON bookings (caller_phone);
+        """)
 
-                -- agents new columns
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS stt_provider TEXT DEFAULT 'sarvam';
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_provider TEXT DEFAULT 'openai';
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_model TEXT DEFAULT 'gpt-4o-mini';
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_provider TEXT DEFAULT 'sarvam';
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS system_prompt TEXT;
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS max_turns INTEGER DEFAULT 20;
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_language TEXT DEFAULT 'hi-IN';
+        # ── 3. Safe migrations (ALTER IF NOT EXISTS) ────────────────────────────
+        cur.execute("""
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS audio_codec TEXT;
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS stt_provider TEXT;
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS tts_provider TEXT;
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS estimated_cost_usd NUMERIC(10,5);
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_hour INTEGER;
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_day_of_week TEXT;
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS interrupt_count INTEGER DEFAULT 0;
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS caller_name TEXT;
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS campaign_id INTEGER;
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS lead_id UUID;
+            ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS room_id TEXT;
 
-                -- demo_links
-                ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto';
-            """)
+            ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS sip_uri TEXT;
+            ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS username TEXT;
+            ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS password TEXT;
+            ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS caller_id_number TEXT;
+            ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
 
-            conn.commit()
-    logger.info("[DB] Tables and schema initialized successfully")
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS phone_numbers TEXT DEFAULT '';
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sip_trunk_id INTEGER;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_concurrent_calls INTEGER DEFAULT 5;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS notes TEXT;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS agent_id UUID;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS calls_per_minute INTEGER DEFAULT 5;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS retry_failed BOOLEAN DEFAULT TRUE;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_retries INTEGER DEFAULT 2;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS stt_provider TEXT DEFAULT 'sarvam';
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_provider TEXT DEFAULT 'openai';
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_model TEXT DEFAULT 'gpt-4o-mini';
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_provider TEXT DEFAULT 'sarvam';
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS system_prompt TEXT;
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS max_turns INTEGER DEFAULT 20;
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_language TEXT DEFAULT 'hi-IN';
+
+            ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto';
+        """)
+
+        conn.commit()
+        cur.close()
+        logger.info("[DB] ✅ Tables and schema initialized successfully")
+
+    except Exception as e:
+        logger.error(f"[DB] init_db FAILED: {e}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
