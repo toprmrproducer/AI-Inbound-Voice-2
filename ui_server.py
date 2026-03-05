@@ -3,8 +3,11 @@ import logging
 import os
 import asyncio
 import uuid
+import csv
+import io
 from datetime import datetime
-from fastapi import FastAPI, Request, HTTPException
+from typing import List, Optional
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, Response
 from dotenv import load_dotenv
 
@@ -14,6 +17,34 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ui-server")
 
 app = FastAPI(title="Med Spa AI Dashboard")
+
+# ── WebSocket Connection Manager ──────────────────────────────────────────────
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        dead = []
+        for ws in self.active_connections:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+ws_manager = ConnectionManager()
+
+# In-memory map of running dialer tasks: campaign_id -> asyncio.Task
+_dialer_tasks: dict = {}
 
 @app.on_event("startup")
 async def startup_event():
@@ -395,6 +426,17 @@ async def api_delete_sip_trunk(trunk_id: int):
     ok = db.delete_sip_trunk(trunk_id)
     return {"status": "deleted" if ok else "error"}
 
+# ── WebSocket: Live Call Status ───────────────────────────────────────────────
+
+@app.websocket("/ws/calls")
+async def websocket_calls(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keep-alive ping/pong
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+
 # ── Campaigns API ─────────────────────────────────────────────────────────────
 
 @app.get("/api/campaigns")
@@ -402,18 +444,32 @@ async def api_get_campaigns():
     import db
     return {"campaigns": db.get_campaigns()}
 
+@app.get("/api/campaigns/{campaign_id}")
+async def api_get_campaign(campaign_id: int):
+    import db
+    c = db.get_campaign_full(campaign_id)
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+    return c
+
 @app.post("/api/campaigns")
 async def api_create_campaign(request: Request):
     data = await request.json()
     name = data.get("name", "").strip()
-    phone_numbers = data.get("phone_numbers", "").strip()
-    sip_trunk_id = data.get("sip_trunk_id") or None
-    max_concurrent_calls = int(data.get("max_concurrent_calls", 5))
-    notes = data.get("notes", "").strip() or None
-    if not name or not phone_numbers:
-        raise HTTPException(400, "name and phone_numbers are required")
+    if not name:
+        raise HTTPException(400, "name is required")
     import db
-    campaign = db.create_campaign(name, phone_numbers, sip_trunk_id, max_concurrent_calls, notes)
+    campaign = db.create_campaign(
+        name=name,
+        phone_numbers=data.get("phone_numbers", "").strip(),
+        sip_trunk_id=data.get("sip_trunk_id") or None,
+        max_concurrent_calls=int(data.get("max_concurrent_calls", 5)),
+        notes=data.get("notes", "").strip() or None,
+        agent_id=data.get("agent_id") or None,
+        calls_per_minute=int(data.get("calls_per_minute", 5)),
+        retry_failed=bool(data.get("retry_failed", True)),
+        max_retries=int(data.get("max_retries", 2)),
+    )
     if not campaign:
         raise HTTPException(500, "Failed to create campaign")
     return campaign
@@ -422,11 +478,113 @@ async def api_create_campaign(request: Request):
 async def api_update_campaign(campaign_id: int, request: Request):
     data = await request.json()
     status = data.get("status", "")
-    if status not in ("scheduled", "running", "paused", "completed"):
+    if status not in ("draft", "scheduled", "active", "running", "paused", "completed"):
         raise HTTPException(400, "Invalid status")
     import db
     ok = db.update_campaign_status(campaign_id, status)
     return {"status": "updated" if ok else "error"}
+
+@app.post("/api/campaigns/{campaign_id}/start")
+async def api_start_campaign(campaign_id: int):
+    """Mark campaign active and launch the dialer engine as an asyncio task."""
+    import db
+    ok = db.update_campaign_status(campaign_id, "active")
+    if not ok:
+        raise HTTPException(500, "Failed to start campaign")
+
+    # Cancel any existing dialer task for this campaign
+    if campaign_id in _dialer_tasks:
+        existing_task = _dialer_tasks.get(campaign_id)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
+    from dialer import run_dialer_for_campaign
+    task = asyncio.create_task(
+        run_dialer_for_campaign(campaign_id, ws_manager.broadcast)
+    )
+    _dialer_tasks[campaign_id] = task
+    logger.info(f"[CAMPAIGN] Dialer started for campaign {campaign_id}")
+    return {"status": "started", "campaign_id": campaign_id}
+
+@app.post("/api/campaigns/{campaign_id}/pause")
+async def api_pause_campaign(campaign_id: int):
+    """Pause campaign — dialer loop detects the status change and stops."""
+    import db
+    ok = db.update_campaign_status(campaign_id, "paused")
+    if not ok:
+        raise HTTPException(500, "Failed to pause campaign")
+    # Cancel the running task if present
+    if campaign_id in _dialer_tasks:
+        task = _dialer_tasks.get(campaign_id)
+        if task and not task.done():
+            task.cancel()
+        del _dialer_tasks[campaign_id]
+    return {"status": "paused", "campaign_id": campaign_id}
+
+# ── Leads API ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/campaigns/{campaign_id}/leads/upload")
+async def api_upload_leads(campaign_id: int, file: UploadFile = File(...)):
+    """
+    Upload a CSV file with leads for a campaign.
+    Required column: phone
+    Optional columns: name, email  (all other columns stored in custom_data JSONB)
+    """
+    import db
+    # Ensure campaign exists
+    c = db.get_campaign_full(campaign_id)
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+
+    contents = await file.read()
+    try:
+        text = contents.decode("utf-8-sig")  # handle BOM
+    except UnicodeDecodeError:
+        text = contents.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+    inserted = 0
+    skipped = 0
+    errors = []
+
+    for i, row in enumerate(reader):
+        phone = (row.get("phone") or row.get("Phone") or row.get("PHONE") or "").strip()
+        if not phone:
+            skipped += 1
+            continue
+        name  = (row.get("name")  or row.get("Name")  or "").strip()
+        email = (row.get("email") or row.get("Email") or "").strip()
+        custom = {k: v for k, v in row.items()
+                  if k.lower() not in ("phone", "name", "email")}
+        try:
+            db.create_lead(campaign_id, phone, name, email, custom)
+            inserted += 1
+        except Exception as e:
+            errors.append(f"Row {i+2}: {e}")
+
+    return {
+        "inserted": inserted,
+        "skipped": skipped,
+        "errors": errors[:10],  # cap error list
+        "message": f"Uploaded {inserted} leads, skipped {skipped} empty rows",
+    }
+
+@app.get("/api/campaigns/{campaign_id}/leads")
+async def api_get_leads(campaign_id: int, status: Optional[str] = None):
+    import db
+    leads = db.get_leads(campaign_id, status=status)
+    return {"leads": leads, "total": len(leads)}
+
+@app.get("/api/campaigns/{campaign_id}/stats")
+async def api_campaign_stats(campaign_id: int):
+    import db
+    stats = db.get_leads_stats(campaign_id)
+    c = db.get_campaign_full(campaign_id)
+    return {
+        "campaign_id": campaign_id,
+        "status": c.get("status") if c else "unknown",
+        "leads": stats,
+    }
 
 # ── Demo Link Endpoints (PostgreSQL-backed) ───────────────────────────────────
 
@@ -838,12 +996,17 @@ async def api_agents_create(request: Request):
         agent = db.create_agent(
             agent_id=str(uuid.uuid4()),
             name=data.get("name", "New Agent"),
+            stt_provider=data.get("stt_provider", "sarvam"),
             stt_language=data.get("stt_language", "hi-IN"),
-            tts_language=data.get("tts_language", "hi-IN"),
-            tts_voice=data.get("tts_voice", "rohan"),
+            llm_provider=data.get("llm_provider", "openai"),
             llm_model=data.get("llm_model", "gpt-4o-mini"),
+            tts_provider=data.get("tts_provider", "sarvam"),
+            tts_voice=data.get("tts_voice", "rohan"),
+            tts_language=data.get("tts_language", "hi-IN"),
             first_line=data.get("first_line", ""),
-            agent_instructions=data.get("agent_instructions", "")
+            system_prompt=data.get("system_prompt", ""),
+            agent_instructions=data.get("agent_instructions", ""),
+            max_turns=int(data.get("max_turns", 20)),
         )
         return agent
     except Exception as e:
@@ -1475,10 +1638,18 @@ async def get_dashboard():
       <div style="display:flex;align-items:center;justify-content:space-between;">
         <div>
           <div class="page-title">📋 Campaigns</div>
-          <div class="page-sub">Create named outbound calling campaigns with retry tracking</div>
+          <div class="page-sub">Create outbound calling campaigns, upload leads, and track progress</div>
         </div>
         <button class="btn btn-primary" onclick="openCampaignModal()">＋ New Campaign</button>
       </div>
+    </div>
+    <!-- Live Calls Panel -->
+    <div class="section-card" style="margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <div class="section-title" style="margin:0;">📞 Live Calls <span id="live-calls-badge" style="font-size:12px;background:rgba(108,99,255,0.15);color:var(--accent);padding:2px 8px;border-radius:20px;margin-left:6px;">0 active</span></div>
+        <div style="font-size:12px;color:var(--muted);" id="ws-status">⚪ Connecting...</div>
+      </div>
+      <div id="live-calls-table" style="font-size:13px;color:var(--muted);">No active calls right now.</div>
     </div>
     <div id="campaigns-list" style="display:grid;gap:12px;"></div>
   </div>
@@ -1538,31 +1709,65 @@ async def get_dashboard():
 
   <!-- ── Campaign Modal ── -->
   <div id="campaign-modal-overlay" onclick="closeCampaignModal(event)" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;">
-    <div style="background:var(--surface);border:1px solid rgba(108,99,255,0.3);border-radius:18px;padding:36px 32px;width:min(520px,94vw);max-height:90vh;overflow-y:auto;" onclick="event.stopPropagation()">
+    <div style="background:var(--surface);border:1px solid rgba(108,99,255,0.3);border-radius:18px;padding:36px 32px;width:min(560px,94vw);max-height:90vh;overflow-y:auto;" onclick="event.stopPropagation()">
       <div style="font-size:18px;font-weight:700;margin-bottom:24px;">📋 New Campaign</div>
       <div class="form-group">
         <label>Campaign Name <span style="color:#f87171">*</span></label>
         <input type="text" id="camp-name" placeholder="e.g. March Follow-up Campaign">
       </div>
       <div class="form-group">
-        <label>Phone Numbers <span style="color:#f87171">*</span></label>
-        <textarea id="camp-phones" rows="6" placeholder="+919876543210&#10;+918765432109&#10;+917654321098" style="font-family:monospace;"></textarea>
-        <div class="hint">One number per line, in E.164 format (+countrycode...)</div>
+        <label>Agent</label>
+        <select id="camp-agent-id" style="width:100%;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;"><option value="">— No agent assigned —</option></select>
+        <div class="hint">Which agent will handle these calls</div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-group">
+        <label>SIP Trunk</label>
+        <select id="camp-trunk-id" style="width:100%;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;"><option value="">— Default trunk —</option></select>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
         <div class="form-group">
-          <label>Max Concurrent Calls</label>
+          <label>Max Concurrent</label>
           <input type="number" id="camp-maxconc" value="5" min="1" max="50">
         </div>
         <div class="form-group">
-          <label>Notes</label>
-          <input type="text" id="camp-notes" placeholder="Optional">
+          <label>Calls / min</label>
+          <input type="number" id="camp-cpm" value="5" min="1" max="60">
         </div>
+        <div class="form-group">
+          <label>Max Retries</label>
+          <input type="number" id="camp-maxretries" value="2" min="0" max="10">
+        </div>
+      </div>
+      <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+        <input type="checkbox" id="camp-retry" style="width:auto;" checked>
+        <label style="font-size:13px;margin:0;">Retry failed calls</label>
+      </div>
+      <div class="form-group">
+        <label>Notes</label>
+        <input type="text" id="camp-notes" placeholder="Optional internal notes">
       </div>
       <div id="camp-modal-error" style="color:#f87171;font-size:13px;margin-bottom:12px;display:none;"></div>
       <div style="display:flex;gap:10px;margin-top:8px;">
         <button class="btn btn-primary" style="flex:1" onclick="submitCampaign()">Create Campaign</button>
-        <button class="btn btn-ghost" onclick="closeCampaignModal()" style="width:100px;">Cancel</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('campaign-modal-overlay').style.display='none'" style="width:100px;">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Lead Upload Modal ── -->
+  <div id="leads-modal-overlay" onclick="if(event.target===this)closeLeadsModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;">
+    <div style="background:var(--surface);border:1px solid rgba(108,99,255,0.3);border-radius:18px;padding:36px 32px;width:min(500px,94vw);max-height:90vh;overflow-y:auto;" onclick="event.stopPropagation()">
+      <div style="font-size:18px;font-weight:700;margin-bottom:8px;">📁 Upload Leads</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:20px;">CSV with <code>phone</code> column required. Optional: <code>name</code>, <code>email</code>. Extra columns go to custom_data.</div>
+      <input type="hidden" id="leads-upload-campaign-id">
+      <div class="form-group">
+        <label>CSV File <span style="color:#f87171">*</span></label>
+        <input type="file" id="leads-file" accept=".csv,.txt" style="width:100%;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;">
+      </div>
+      <div id="leads-upload-result" style="font-size:13px;margin-bottom:12px;display:none;"></div>
+      <div style="display:flex;gap:10px;margin-top:8px;">
+        <button class="btn btn-primary" style="flex:1" onclick="uploadLeads()">Upload</button>
+        <button class="btn btn-ghost" onclick="closeLeadsModal()" style="width:100px;">Close</button>
       </div>
     </div>
   </div>
@@ -2119,72 +2324,219 @@ async function stopBulkCampaign() {{
 }}
 
 // ── Campaigns ─────────────────────────────────────────────────────────────────
+let _liveCalls = {{}};
+
 async function loadCampaigns() {{
   const el = document.getElementById('campaigns-list'); if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);padding:20px;">Loading...</div>';
-  const data = await fetch('/api/campaigns').then(r=>r.json()).catch(()=>({{campaigns:[]}}));
+
+  // Also populate agent + trunk selectors in the modal
+  try {{
+    const [agentsData, trunksData] = await Promise.all([
+      fetch('/api/agents').then(r=>r.json()),
+      fetch('/api/sip-trunks').then(r=>r.json()).catch(()=>({trunks:[]}))
+    ]);
+    const asel = document.getElementById('camp-agent-id');
+    if (asel) {{
+      asel.innerHTML = '<option value="">— No agent assigned —</option>' +
+        (Array.isArray(agentsData)?agentsData:(agentsData.agents||[])).map(a=>`<option value="${{a.id}}">${{a.name}}${{a.is_active?' ★':''}}</option>`).join('');
+    }}
+    const tsel = document.getElementById('camp-trunk-id');
+    if (tsel) {{
+      tsel.innerHTML = '<option value="">— Default trunk —</option>' +
+        (trunksData.trunks||[]).map(t=>`<option value="${{t.id}}">${{t.name}} (${{t.provider}})</option>`).join('');
+    }}
+  }} catch(e) {{ /* ignore */ }}
+
+  const data = await fetch('/api/campaigns').then(r=>r.json()).catch(()=>({campaigns:[]}));
   const campaigns = data.campaigns || [];
   if (!campaigns.length) {{
     el.innerHTML = '<div class="section-card" style="color:var(--muted)">No campaigns yet. Click "+ New Campaign" to create one.</div>';
     return;
   }}
-  el.innerHTML = campaigns.map(c => `
+
+  // Load stats for each campaign
+  const statsAll = await Promise.all(campaigns.map(c =>
+    fetch(`/api/campaigns/${{c.id}}/stats`).then(r=>r.json()).catch(()=>({leads:{{total:0,pending:0,calling:0,completed:0,failed:0}}}))
+  ));
+
+  el.innerHTML = campaigns.map((c, idx) => {{
+    const s = (statsAll[idx]||{{}}).leads || {{}};
+    const statusColor = {{'active':'#4ade80','paused':'#fbbf24','completed':'#6b7280','draft':'#a78bfa'}}[c.status]||'#94a3b8';
+    const isActive = c.status === 'active';
+    return `
     <div class="section-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <div style="font-weight:700;font-size:15px;">📋 ${{c.name}}</div>
-          <div style="font-size:12px;color:var(--muted);margin-top:4px;">Status: ${{c.status}} · Max concurrent: ${{c.max_concurrent_calls}}</div>
-          ${{c.notes ? `<div style="font-size:12px;color:var(--muted)">Notes: ${{c.notes}}</div>` : ''}}
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:0;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div style="font-weight:700;font-size:15px;">📋 ${{c.name}}</div>
+            <span style="font-size:11px;font-weight:600;color:${{statusColor}};background:${{statusColor}}22;padding:2px 8px;border-radius:12px;text-transform:uppercase;">●&nbsp;${{c.status}}</span>
+            ${{c.agent_name ? `<span style="font-size:11px;color:var(--muted);">${{c.agent_name}}</span>` : ''}}
+          </div>
+          <div style="margin-top:8px;display:flex;gap:20px;font-size:12px;color:var(--muted);flex-wrap:wrap;">
+            <span>📋 Total: <strong style="color:var(--text);">${{s.total||0}}</strong></span>
+            <span>⏳ Pending: <strong style="color:#fbbf24;">${{s.pending||0}}</strong></span>
+            <span>📞 Calling: <strong style="color:#4ade80;">${{s.calling||0}}</strong></span>
+            <span>✅ Done: <strong style="color:#6b7280;">${{s.completed||0}}</strong></span>
+            <span>❌ Failed: <strong style="color:#f87171;">${{s.failed||0}}</strong></span>
+          </div>
+          ${{c.notes ? `<div style="font-size:12px;color:var(--muted);margin-top:4px;">📝 ${{c.notes}}</div>` : ''}}
         </div>
-        <div style="display:flex;gap:8px;">
-          <button class="btn btn-ghost" onclick="updateCampaignStatus(${{c.id}},'running')">▶ Run</button>
-          <button class="btn btn-ghost" onclick="updateCampaignStatus(${{c.id}},'paused')">⏸</button>
-          <button class="btn btn-ghost" onclick="updateCampaignStatus(${{c.id}},'completed')" style="color:var(--muted)">✅ Done</button>
+        <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap;">
+          <button class="btn btn-ghost" style="font-size:12px;padding:6px 12px;" onclick="openLeadsModal(${{c.id}})">📁 Leads</button>
+          ${{isActive
+            ? `<button class="btn btn-ghost" style="font-size:12px;padding:6px 12px;color:#fbbf24;" onclick="pauseCampaign(${{c.id}})">⏸ Pause</button>`
+            : `<button class="btn btn-primary" style="font-size:12px;padding:6px 12px;" onclick="startCampaign(${{c.id}})">▶ Start</button>`
+          }}
         </div>
       </div>
-      <div style="margin-top:10px;font-size:12px;color:var(--muted);">
-        <strong>Phone numbers:</strong><br>
-        <span style="white-space:pre-wrap">${{c.phone_numbers?.substring(0,200)}}</span>
-      </div>
-    </div>
-  `).join('');
+    </div>`;
+  }}).join('');
 }}
 
-async function updateCampaignStatus(id, status) {{
-  await fetch('/api/campaigns/'+id, {{method:'PATCH', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{status}})}});
+async function startCampaign(id) {{
+  const r = await fetch(`/api/campaigns/${{id}}/start`, {{method:'POST'}});
+  if (!r.ok) {{ alert('Failed to start campaign'); return; }}
+  loadCampaigns();
+}}
+
+async function pauseCampaign(id) {{
+  await fetch(`/api/campaigns/${{id}}/pause`, {{method:'POST'}});
   loadCampaigns();
 }}
 
 function openCampaignModal() {{
   document.getElementById('camp-name').value = '';
-  document.getElementById('camp-phones').value = '';
   document.getElementById('camp-maxconc').value = '5';
+  document.getElementById('camp-cpm').value = '5';
+  document.getElementById('camp-maxretries').value = '2';
+  document.getElementById('camp-retry').checked = true;
   document.getElementById('camp-notes').value = '';
   document.getElementById('camp-modal-error').style.display = 'none';
-  const overlay = document.getElementById('campaign-modal-overlay');
-  overlay.style.display = 'flex';
+  document.getElementById('campaign-modal-overlay').style.display = 'flex';
 }}
+
 function closeCampaignModal(e) {{
   if (e && e.target !== document.getElementById('campaign-modal-overlay')) return;
   document.getElementById('campaign-modal-overlay').style.display = 'none';
 }}
+
 async function submitCampaign() {{
-  const name = document.getElementById('camp-name').value.trim();
-  const phones = document.getElementById('camp-phones').value.trim();
-  const maxConc = parseInt(document.getElementById('camp-maxconc').value) || 5;
-  const notes = document.getElementById('camp-notes').value.trim();
-  const errEl = document.getElementById('camp-modal-error');
-  if (!name || !phones) {{ errEl.textContent = 'Name and phone numbers are required.'; errEl.style.display='block'; return; }}
+  const name     = document.getElementById('camp-name').value.trim();
+  const agentId  = document.getElementById('camp-agent-id')?.value || '';
+  const trunkId  = document.getElementById('camp-trunk-id')?.value || '';
+  const maxConc  = parseInt(document.getElementById('camp-maxconc').value) || 5;
+  const cpm      = parseInt(document.getElementById('camp-cpm').value) || 5;
+  const retries  = parseInt(document.getElementById('camp-maxretries').value) ?? 2;
+  const retry    = document.getElementById('camp-retry')?.checked ?? true;
+  const notes    = document.getElementById('camp-notes').value.trim();
+  const errEl    = document.getElementById('camp-modal-error');
+  if (!name) {{ errEl.textContent = 'Campaign name is required.'; errEl.style.display='block'; return; }}
   errEl.style.display = 'none';
   try {{
     const r = await fetch('/api/campaigns', {{
       method:'POST', headers:{{'Content-Type':'application/json'}},
-      body:JSON.stringify({{name, phone_numbers:phones, max_concurrent_calls:maxConc, notes}})
+      body:JSON.stringify({{
+        name,
+        agent_id: agentId || null,
+        sip_trunk_id: trunkId ? parseInt(trunkId) : null,
+        max_concurrent_calls: maxConc,
+        calls_per_minute: cpm,
+        max_retries: retries,
+        retry_failed: retry,
+        notes
+      }})
     }});
     if (!r.ok) throw new Error('Server error ' + r.status);
     document.getElementById('campaign-modal-overlay').style.display = 'none';
     loadCampaigns();
   }} catch(e) {{ errEl.textContent = '❌ Failed: ' + e.message; errEl.style.display='block'; }}
+}}
+
+function openLeadsModal(campaignId) {{
+  document.getElementById('leads-upload-campaign-id').value = campaignId;
+  document.getElementById('leads-file').value = '';
+  document.getElementById('leads-upload-result').style.display = 'none';
+  document.getElementById('leads-modal-overlay').style.display = 'flex';
+}}
+
+function closeLeadsModal() {{
+  document.getElementById('leads-modal-overlay').style.display = 'none';
+}}
+
+async function uploadLeads() {{
+  const campaignId = document.getElementById('leads-upload-campaign-id').value;
+  const fileInput  = document.getElementById('leads-file');
+  const resultEl   = document.getElementById('leads-upload-result');
+  if (!fileInput.files.length) {{ resultEl.textContent = '⚠ Please select a CSV file'; resultEl.style.color='#fbbf24'; resultEl.style.display='block'; return; }}
+  resultEl.textContent = 'Uploading...';
+  resultEl.style.color = 'var(--muted)';
+  resultEl.style.display = 'block';
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  try {{
+    const r = await fetch(`/api/campaigns/${{campaignId}}/leads/upload`, {{method:'POST', body:formData}});
+    const d = await r.json();
+    if (!r.ok) {{ resultEl.textContent = '❌ ' + (d.detail || 'Upload failed'); resultEl.style.color='#f87171'; return; }}
+    resultEl.textContent = `✅ ${{d.message}}`;
+    resultEl.style.color = '#4ade80';
+    loadCampaigns();
+  }} catch(e) {{ resultEl.textContent = '❌ ' + e.message; resultEl.style.color='#f87171'; }}
+}}
+
+// ── WebSocket Live Calls ──────────────────────────────────────────────────────
+function initLiveCallsWS() {{
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${{proto}}://${{location.host}}/ws/calls`);
+  const badge = document.getElementById('live-calls-badge');
+  const tbl   = document.getElementById('live-calls-table');
+  const wsStatus = document.getElementById('ws-status');
+
+  ws.onopen = () => {{ if(wsStatus) wsStatus.textContent = '🟢 Connected'; }};
+  ws.onclose = () => {{
+    if(wsStatus) wsStatus.textContent = '🔴 Disconnected';
+    setTimeout(initLiveCallsWS, 5000); // reconnect
+  }};
+  ws.onerror = () => {{ if(wsStatus) wsStatus.textContent = '⚠ WS Error'; }};
+
+  ws.onmessage = (evt) => {{
+    try {{
+      const msg = JSON.parse(evt.data);
+      if (msg.type === 'call_status') {{
+        if (msg.status === 'calling') {{
+          _liveCalls[msg.lead_id] = msg;
+        }} else {{
+          delete _liveCalls[msg.lead_id];
+        }}
+        renderLiveCalls();
+      }}
+    }} catch(e) {{ /* ignore */ }}
+  }};
+  // Keep-alive ping every 20s
+  setInterval(() => {{ if(ws.readyState===1) ws.send('ping'); }}, 20000);
+}}
+
+function renderLiveCalls() {{
+  const calls = Object.values(_liveCalls);
+  const badge = document.getElementById('live-calls-badge');
+  const tbl   = document.getElementById('live-calls-table');
+  if (!tbl) return;
+  if (badge) badge.textContent = `${{calls.length}} active`;
+  if (!calls.length) {{ tbl.innerHTML = '<span style="color:var(--muted);">No active calls right now.</span>'; return; }}
+  tbl.innerHTML = `<table style="width:100%;border-collapse:collapse;">
+    <thead><tr style="border-bottom:1px solid var(--border);">
+      <th style="padding:8px 12px;text-align:left;color:var(--muted);font-weight:500;font-size:12px;">Phone</th>
+      <th style="padding:8px 12px;text-align:left;color:var(--muted);font-weight:500;font-size:12px;">Name</th>
+      <th style="padding:8px 12px;text-align:left;color:var(--muted);font-weight:500;font-size:12px;">Room</th>
+      <th style="padding:8px 12px;text-align:left;color:var(--muted);font-weight:500;font-size:12px;">Started</th>
+    </tr></thead>
+    <tbody>${{calls.map(c=>`<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:8px 12px;">${{c.phone}}</td>
+      <td style="padding:8px 12px;">${{c.name||'—'}}</td>
+      <td style="padding:8px 12px;font-size:11px;color:var(--muted);"><code>${{c.room||''}}</code></td>
+      <td style="padding:8px 12px;font-size:11px;color:var(--muted);">${{c.timestamp?.substring(11,19)||''}}</td>
+    </tr>`).join('')}}</tbody>
+  </table>`;
 }}
 
 // ── SIP Trunks ────────────────────────────────────────────────────────────────
@@ -2302,6 +2654,8 @@ async function createDemo() {{
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 loadDashboard();
+// Start live calls WebSocket (auto-reconnects)
+initLiveCallsWS();
 </script>
 </body>
 </html>"""

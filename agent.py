@@ -761,6 +761,10 @@ async def entrypoint(ctx: JobContext):
     raw_meta     = ctx.job.metadata or ""
     caller_name  = "Unknown"
 
+    campaign_id = None
+    lead_id = None
+    meta_agent_id = None
+
     if raw_meta.strip():
         try:
             meta = json.loads(raw_meta)
@@ -770,9 +774,12 @@ async def entrypoint(ctx: JobContext):
                 or meta.get("destination")
             )
             caller_name = meta.get("name", caller_name)
+            campaign_id = meta.get("campaign_id")
+            lead_id = meta.get("lead_id")
+            meta_agent_id = meta.get("agent_id")
             if phone_number:
                 call_type = "outbound"
-                logger.info(f"[CALL] Outbound → {phone_number}")
+                logger.info(f"[CALL] Outbound → {phone_number} | campaign={campaign_id} | lead={lead_id}")
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning(f"[METADATA] Parse error: {e} — treating as inbound")
 
@@ -784,8 +791,28 @@ async def entrypoint(ctx: JobContext):
 
     # ── (already connected above for demo routing) ──────────────────────
 
-    # ── Load live config early (needed for SIP trunk ID and all agent settings) ──
+    # ── Load live config (prefer specific agent from metadata if provided) ──────
     live_config = get_live_config(phone_number)
+    if meta_agent_id:
+        try:
+            import db as _db
+            specific_agent = _db.get_agent_by_id(meta_agent_id)
+            if specific_agent:
+                # Override live_config fields with the specific agent's values
+                if specific_agent.get("agent_instructions"): live_config["agent_instructions"] = specific_agent["agent_instructions"]
+                if specific_agent.get("system_prompt"): live_config["agent_instructions"] = specific_agent["system_prompt"]
+                if specific_agent.get("first_line"): live_config["first_line"] = specific_agent["first_line"]
+                if specific_agent.get("llm_model"): live_config["llm_model"] = specific_agent["llm_model"]
+                if specific_agent.get("llm_provider"): live_config["llm_provider"] = specific_agent["llm_provider"]
+                if specific_agent.get("tts_voice"): live_config["tts_voice"] = specific_agent["tts_voice"]
+                if specific_agent.get("tts_language"): live_config["tts_language"] = specific_agent["tts_language"]
+                if specific_agent.get("tts_provider"): live_config["tts_provider"] = specific_agent["tts_provider"]
+                if specific_agent.get("stt_provider"): live_config["stt_provider"] = specific_agent["stt_provider"]
+                if specific_agent.get("stt_language"): live_config["stt_language"] = specific_agent["stt_language"]
+                if specific_agent.get("max_turns"): live_config["max_turns"] = specific_agent["max_turns"]
+                logger.info(f"[AGENT] Loaded specific agent config from DB: {specific_agent.get('name')}")
+        except Exception as _e:
+            logger.warning(f"[AGENT] Could not load agent {meta_agent_id} from DB: {_e}")
 
     # ── Outbound: dial via Vobiz SIP trunk ────────────────────────────────
     if call_type == "outbound" and phone_number:
@@ -1310,6 +1337,32 @@ async def entrypoint(ctx: JobContext):
 
         final_summary = groq_summary or booking_status_msg
 
+        # ── Save booking to bookings table ─────────────────────────────────
+        if agent_tools.booking_intent:
+            try:
+                from db import save_booking
+                intent = agent_tools.booking_intent
+                save_booking(
+                    call_room_id=ctx.room.name,
+                    caller_name=intent.get("caller_name", ""),
+                    caller_phone=intent.get("caller_phone", caller_phone),
+                    caller_email=intent.get("caller_email", ""),
+                    start_time=intent.get("start_time", ""),
+                    notes=intent.get("notes", ""),
+                )
+                logger.info("[DB] Booking saved to bookings table")
+            except Exception as _be:
+                logger.warning(f"[DB] save_booking failed: {_be}")
+
+        # ── Update lead status if this was a campaign call ─────────────────
+        if lead_id:
+            try:
+                from db import update_lead_status as _uls
+                _uls(str(lead_id), "completed")
+                logger.info(f"[DB] Lead {lead_id} marked completed")
+            except Exception as _le:
+                logger.warning(f"[DB] update_lead_status failed: {_le}")
+
         from db import save_call_log
         save_call_log(
             phone=caller_phone,
@@ -1326,6 +1379,9 @@ async def entrypoint(ctx: JobContext):
             was_booked=bool(agent_tools.booking_intent),
             stt_provider=live_config.get("stt_provider", "sarvam"),
             tts_provider=live_config.get("tts_provider", "sarvam"),
+            campaign_id=campaign_id,
+            lead_id=lead_id,
+            room_id=ctx.room.name,
         )
 
         # #38 — Mark call as completed
