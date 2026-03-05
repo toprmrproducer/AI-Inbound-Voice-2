@@ -16,6 +16,15 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ui-server")
 
+# ── DB schema init (synchronous, runs at module load before any request) ───────
+try:
+    import db as _db_init
+    _db_init.init_db()
+    logger.info("[STARTUP] ✅ DB schema ready")
+except Exception as _dbe:
+    logger.error(f"[STARTUP] ❌ init_db failed at module load: {_dbe}")
+
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
