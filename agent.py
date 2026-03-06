@@ -109,7 +109,7 @@ LANGUAGE_CONFIG = {
     "hi-IN": {"speaker": "rohan",      "tts_lang": "hi-IN", "name": "Hindi"},
     "bn-IN": {"speaker": "arnav",      "tts_lang": "bn-IN", "name": "Bengali"},
     "ta-IN": {"speaker": "pavithra",   "tts_lang": "ta-IN", "name": "Tamil"},
-    "te-IN": {"speaker": "ananya",     "tts_lang": "te-IN", "name": "Telugu"},
+    "te-IN": {"speaker": "roopa",      "tts_lang": "te-IN", "name": "Telugu"},
     "gu-IN": {"speaker": "avni",       "tts_lang": "gu-IN", "name": "Gujarati"},
     "kn-IN": {"speaker": "suresh",     "tts_lang": "kn-IN", "name": "Kannada"},
     "ml-IN": {"speaker": "aswin",      "tts_lang": "ml-IN", "name": "Malayalam"},
@@ -134,8 +134,8 @@ GREETINGS = {
     "mr-IN": "नमस्कार! मी तुमचा मेड स्पा सहाय्यक आहे. आज मी तुम्हाला कशी मदद करू शकतो?",
     "pa-IN": "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ ਤੁਹਾਡਾ ਮੇਡ ਸਪਾ ਸਹਾਇਕ ਹਾਂ। ਮੈਂ ਅੱਜ ਤੁਹਾਡੀ ਕਿਵੇਂ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ?",
     "od-IN": "ନମସ୍କାର! ମୁଁ ଆପଣଙ୍କ ମେଡ ସ୍ପା ସହାୟକ। ଆଜି ମୁଁ ଆପଣଙ୍କୁ କିପରି ସାହାଯ୍ୟ କରିପାରିବି?",
-    "en-IN": "Hello! Welcome to Malla Reddy University. I'm Ananya, your admissions assistant. How can I help you today?",
-    "auto": "Hello! Namaste! Malla Reddy University mein swagat hai — నమస్కారం! Main Ananya hoon. Hindi, Telugu, ya English — kisi mein bhi baat karein!",
+    "en-IN": "Hello! Welcome to Malla Reddy University. I'm Roopa, your admissions assistant. How can I help you today?",
+    "auto": "Hello! Namaste! Malla Reddy University mein swagat hai — నమస్కారం! Main Roopa hoon. Hindi, Telugu, ya English — kisi mein bhi baat karein!",
 }
 
 MED_SPA_SERVICES = "facials, laser treatments, Botox, skin care, hair removal, body contouring"
