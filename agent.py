@@ -124,18 +124,18 @@ LANGUAGE_CONFIG = {
 }
 
 GREETINGS = {
-    "hi-IN": "नमस्ते! मैं आपका मेड स्पा असिस्टेंट हूं। आज मैं आपकी कैसे मदद कर सकता हूं?",
+    "hi-IN": "नमस्ते! मल्ला रेड्डी यूनिवर्सिटी में आपका स्वागत है। मैं अनन्या हूँ — कोर्स, एडमिशन या फीस, बताइए कैसे मदद करूँ?",
     "ta-IN": "வணக்கம்! நான் உங்கள் மெட் ஸ்பா உதவியாளர். நான் உங்களுக்கு எப்படி உதவலாம்?",
     "bn-IN": "নমস্কার! আমি আপনার মেড স্পা সহকারী। আজ আমি আপনাকে কীভাবে সাহায্য করতে পারি?",
-    "te-IN": "నమస్కారం! నేను మీ మెడ్ స్పా అసిస్టెంట్. నేను మీకు ఎలా సహాయం చేయగలను?",
+    "te-IN": "నమస్కారం! మల్లా రెడ్డి యూనివర్సిటీకి స్వాగతం. నేను అనన్య — కోర్సులు, అడ్మిషన్లు, ఫీజుల విషయంలో ఎలా సహాయం చేయాలి?",
     "gu-IN": "નમસ્તે! હું તમારો મેડ સ્પા સહાયક છું. આજ હું તમારી કેવી રીતે મદદ કરી શકું?",
     "kn-IN": "ನಮಸ್ಕಾರ! ನಾನು ನಿಮ್ಮ ಮೆಡ್ ಸ್ಪಾ ಸಹಾಯಕ. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?",
     "ml-IN": "നമസ്കാരം! ഞാൻ നിങ്ങളുടെ മെഡ് സ്പാ അസിസ്റ്റന്റ് ആണ്. ഞാൻ നിങ്ങളെ എങ്ങനെ സഹായിക്കാം?",
     "mr-IN": "नमस्कार! मी तुमचा मेड स्पा सहाय्यक आहे. आज मी तुम्हाला कशी मदद करू शकतो?",
     "pa-IN": "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ ਤੁਹਾਡਾ ਮੇਡ ਸਪਾ ਸਹਾਇਕ ਹਾਂ। ਮੈਂ ਅੱਜ ਤੁਹਾਡੀ ਕਿਵੇਂ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ?",
     "od-IN": "ନମସ୍କାର! ମୁଁ ଆପଣଙ୍କ ମେଡ ସ୍ପା ସହାୟକ। ଆଜି ମୁଁ ଆପଣଙ୍କୁ କିପରି ସାହାଯ୍ୟ କରିପାରିବି?",
-    "en-IN": "Hello! I'm your Med Spa assistant. How can I help you today?",
-    "auto": "Hello! Namaste! I'm your Med Spa assistant — you can speak in any Indian language.",
+    "en-IN": "Hello! Welcome to Malla Reddy University. I'm Ananya, your admissions assistant. How can I help you today?",
+    "auto": "Hello! Namaste! Malla Reddy University mein swagat hai — నమస్కారం! Main Ananya hoon. Hindi, Telugu, ya English — kisi mein bhi baat karein!",
 }
 
 MED_SPA_SERVICES = "facials, laser treatments, Botox, skin care, hair removal, body contouring"
@@ -550,18 +550,12 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
         super().__init__(instructions=final_instructions, tools=tools)
 
     async def on_enter(self):
-        # #28 — Dynamic greeting from config
-        # Use session.say() directly to guarantee TTS delivery of the opening line.
-        # generate_reply() only feeds context to the LLM and may not produce audio.
         greeting = (
             self._live_config.get("opening_greeting")
             or self._first_line
-            or (
-                "Namaste! Welcome to Daisy's Med Spa. "
-                "Main aapki kaise madad kar sakti hoon? "
-                "I can answer questions about our treatments or help you book an appointment."
-            )
+            or "Namaste! Welcome. How can I help you today?"
         )
+        # Use session.say() — direct TTS, no LLM, guaranteed to fire
         await self.session.say(greeting, allow_interruptions=True)
 
 
@@ -725,6 +719,7 @@ async def run_demo_session(ctx: JobContext):
 
     # Pass explicit participant so STT subscribes to their mic track, not a SIP trunk
     await session.start(room=ctx.room, agent=agent)
+    await asyncio.sleep(1.5)  # Give SIP participant time to fully connect audio
 
     logger.info("[DEMO] Session live.")
 
@@ -1020,6 +1015,7 @@ async def entrypoint(ctx: JobContext):
         agent=agent,
         room_input_options=_room_input_opts,
     )
+    await asyncio.sleep(1.5)  # Give SIP participant time to fully connect audio
 
     # #12 — TTS pre-warming
     try:
