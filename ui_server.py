@@ -16,31 +16,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ui-server")
 
-# ── DB schema init (synchronous, runs at module load before any request) ───────
-try:
-    import db as _db_init
-    _db_init.init_db()
-    logger.info("[STARTUP] ✅ DB schema ready")
-except Exception as _dbe:
-    logger.error(f"[STARTUP] ❌ init_db failed at module load: {_dbe}")
-
-
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app):
-    """Run init_db() on startup so all tables exist before the first request."""
-    try:
-        import db
-        db.init_db()
-        logger.info("[STARTUP] ✅ Database schema initialised")
-    except Exception as e:
-        logger.error(f"[STARTUP] ❌ init_db failed: {e}")
-        # Don't abort — server can still serve routes that don't need the DB
-    yield  # app is running
-    # (shutdown cleanup here if needed)
-
-app = FastAPI(title="Med Spa AI Dashboard", lifespan=lifespan)
+app = FastAPI(title="Med Spa AI Dashboard")
 
 # ── WebSocket Connection Manager ──────────────────────────────────────────────
 class ConnectionManager:
@@ -466,11 +442,7 @@ async def websocket_calls(websocket: WebSocket):
 @app.get("/api/campaigns")
 async def api_get_campaigns():
     import db
-    try:
-        return {"campaigns": db.get_campaigns()}
-    except Exception as e:
-        logger.error(f"[API] GET /api/campaigns failed: {e}")
-        return {"campaigns": []}
+    return {"campaigns": db.get_campaigns()}
 
 @app.get("/api/campaigns/{campaign_id}")
 async def api_get_campaign(campaign_id: int):
@@ -1000,35 +972,21 @@ import db
 
 @app.get("/api/agents")
 async def api_agents_list():
-    try:
-        agents = db.get_agents()
-    except Exception as e:
-        logger.error(f"[API] GET /api/agents — db.get_agents() failed: {e}")
-        return []
-
+    agents = db.get_agents()
     if not agents:
-        # Auto-seed one default agent on first run (safe UUID, reads from config)
-        try:
-            cfg = read_config()
-            db.create_agent(
-                agent_id=str(uuid.uuid4()),
-                name="Daisy — Med Spa (Default)",
-                stt_language=cfg.get("stt_language", "hi-IN"),
-                tts_language=cfg.get("tts_language", "hi-IN"),
-                tts_voice=cfg.get("tts_voice", "rohan"),
-                llm_model=cfg.get("llm_model", "gpt-4o-mini"),
-                first_line=cfg.get("first_line", ""),
-                agent_instructions=cfg.get("agent_instructions", "")
-            )
-            # Activate the first (and only) agent
-            all_agents = db.get_agents()
-            if all_agents:
-                db.activate_agent(all_agents[0]["id"])
-            agents = db.get_agents()
-        except Exception as e:
-            logger.error(f"[API] GET /api/agents — auto-seed failed: {e}")
-            return []
-
+        cfg = read_config()
+        db.create_agent(
+            agent_id="default",
+            name="Daisy — Med Spa (Default)",
+            stt_language=cfg.get("stt_language", "hi-IN"),
+            tts_language=cfg.get("tts_language", "hi-IN"),
+            tts_voice=cfg.get("tts_voice", "rohan"),
+            llm_model=cfg.get("llm_model", "gpt-4o-mini"),
+            first_line=cfg.get("first_line", ""),
+            agent_instructions=cfg.get("agent_instructions", "")
+        )
+        db.activate_agent("default")
+        agents = db.get_agents()
     return agents
 
 @app.post("/api/agents")

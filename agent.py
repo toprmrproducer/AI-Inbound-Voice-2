@@ -744,13 +744,6 @@ async def run_demo_session(ctx: JobContext):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def entrypoint(ctx: JobContext):
-    # ── Ensure DB schema exists in this worker process ─────────────────────────────
-    try:
-        from db import init_db as _init_db
-        _init_db()
-    except Exception as _dbe:
-        logger.warning(f"[DB] init_db in entrypoint failed (non-critical): {_dbe}")
-
     logger.info(f"[JOB] id={ctx.job.id}")
     logger.info(f"[JOB] raw metadata='{ctx.job.metadata}'")
 
@@ -1026,8 +1019,7 @@ async def entrypoint(ctx: JobContext):
         room=ctx.room,
         agent=agent,
         room_input_options=_room_input_opts,
-        # NOTE: participant= kwarg not supported in this version of livekit-agents.
-        # The session auto-subscribes to all room participants (incl. SIP caller).
+        participant=sip_participant,  # Binds STT to the caller's audio track
     )
 
     # #12 — TTS pre-warming
@@ -1448,91 +1440,18 @@ async def entrypoint(ctx: JobContext):
     # is intentionally NOT registered here to prevent double execution.
 
 
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# PREFLIGHT CHECK — validates env + DB before accepting any calls
+# WORKER ENTRY
 # ══════════════════════════════════════════════════════════════════════════════
 
-def preflight_check():
-    """
-    Run once at startup. Validates all required env vars and DB connectivity.
-    If anything is missing, logs the error and raises SystemExit so the container
-    refuses to start — instead of crashing mid-call.
-    """
-    _log = logging.getLogger("preflight")
-    errors = []
-
-    required_env = [
-        "DATABASE_URL",
-        "LIVEKIT_URL",
-        "LIVEKIT_API_KEY",
-        "LIVEKIT_API_SECRET",
-        "SARVAM_API_KEY",
-        "OPENAI_API_KEY",
-    ]
-    for var in required_env:
-        if not os.environ.get(var):
-            errors.append(f"Missing required env var: {var}")
-        else:
-            _log.info(f"[PREFLIGHT] ✅ {var} set")
-
-    # Test DB connectivity
-    try:
-        import db as _db_mod
-        conn = _db_mod.get_conn()
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-        conn.close()
-        _log.info("[PREFLIGHT] ✅ Database connection OK")
-    except Exception as _dbe:
-        errors.append(f"Database connection failed: {_dbe}")
-
-    # Warn (not fail) if SIP trunk not set
-    sip_trunk_id = os.environ.get("OUTBOUND_TRUNK_ID") or os.environ.get("SIP_TRUNK_ID")
-    if not sip_trunk_id:
-        _log.warning("[PREFLIGHT] ⚠ OUTBOUND_TRUNK_ID / SIP_TRUNK_ID not set — outbound calls will fail")
-    else:
-        _log.info(f"[PREFLIGHT] ✅ SIP trunk set: {sip_trunk_id}")
-
-    if errors:
-        for err in errors:
-            _log.error(f"[PREFLIGHT] ❌ {err}")
-        raise SystemExit(
-            f"\n[PREFLIGHT] Startup aborted — {len(errors)} error(s). Fix env vars and redeploy.\n"
-        )
-
-    _log.info("[PREFLIGHT] ✅ All checks passed — agent is ready to accept calls")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# WORKER ENTRY — runs whether launched via `python agent.py` or Coolify runner
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _startup():
-    """Module-level startup so init_db + preflight run in every launch mode."""
-    _log = logging.getLogger("agent.startup")
-
-    # 1. Validate environment + DB connectivity
-    preflight_check()
-
-    # 2. Create / migrate all DB tables (idempotent — safe to re-run)
+if __name__ == "__main__":
+    # Initialise the database schema on startup (idempotent)
     try:
         from db import init_db
         init_db()
-        _log.info("[STARTUP] ✅ DB schema initialised")
-    except Exception as _dbe:
-        # Non-fatal: agent falls back to file-based config if DB is unavailable
-        _log.warning(f"[STARTUP] ⚠ init_db failed (agent will use file config): {_dbe}")
-
-    # 3. Launch the worker
-    _log.info("[STARTUP] Starting LiveKit agent worker...")
+    except Exception as _db_err:
+        logging.getLogger("agent").warning(f"[DB] init_db skipped: {_db_err}")
     cli.run_app(WorkerOptions(
         entrypoint_fnc=entrypoint,
-        agent_name="outbound-caller"
+        agent_name="outbound-caller" 
     ))
-
-
-if __name__ == "__main__":
-    _startup()
-
