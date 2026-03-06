@@ -106,36 +106,26 @@ def is_rate_limited(phone: str) -> bool:
 
 # Sarvam Bulbul v3 — best voice per language
 LANGUAGE_CONFIG = {
-    "hi-IN": {"speaker": "rohan",      "tts_lang": "hi-IN", "name": "Hindi"},
-    "bn-IN": {"speaker": "arnav",      "tts_lang": "bn-IN", "name": "Bengali"},
-    "ta-IN": {"speaker": "pavithra",   "tts_lang": "ta-IN", "name": "Tamil"},
-    "te-IN": {"speaker": "roopa",      "tts_lang": "te-IN", "name": "Telugu"},
-    "gu-IN": {"speaker": "avni",       "tts_lang": "gu-IN", "name": "Gujarati"},
-    "kn-IN": {"speaker": "suresh",     "tts_lang": "kn-IN", "name": "Kannada"},
-    "ml-IN": {"speaker": "aswin",      "tts_lang": "ml-IN", "name": "Malayalam"},
-    "mr-IN": {"speaker": "aarohi",     "tts_lang": "mr-IN", "name": "Marathi"},
-    "pa-IN": {"speaker": "gurpreet",   "tts_lang": "pa-IN", "name": "Punjabi"},
-    "od-IN": {"speaker": "subhashini", "tts_lang": "od-IN", "name": "Odia"},
-    "en-IN": {"speaker": "anushka",    "tts_lang": "en-IN", "name": "English"},
-    # STT-only (no Bulbul TTS — fallback)
-    "ur-IN": {"speaker": "rohan",      "tts_lang": "hi-IN", "name": "Urdu"},
-    "as-IN": {"speaker": "aarohi",     "tts_lang": "mr-IN", "name": "Assamese"},
-    "ne-IN": {"speaker": "rohan",      "tts_lang": "hi-IN", "name": "Nepali"},
+    "hi-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Hindi"},
+    "te-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Telugu"},
+    "en-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "English"},
+    "ta-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Tamil"},
+    "bn-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Bengali"},
+    "gu-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Gujarati"},
+    "kn-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Kannada"},
+    "ml-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Malayalam"},
+    "mr-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Marathi"},
+    "pa-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Punjabi"},
+    "od-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Odia"},
+    "ur-IN": {"speaker": "roopa", "tts_lang": "te-IN", "name": "Urdu"},
 }
 
 GREETINGS = {
-    "hi-IN": "नमस्ते! मल्ला रेड्डी यूनिवर्सिटी में आपका स्वागत है। मैं अनन्या हूँ — कोर्स, एडमिशन या फीस, बताइए कैसे मदद करूँ?",
-    "ta-IN": "வணக்கம்! நான் உங்கள் மெட் ஸ்பா உதவியாளர். நான் உங்களுக்கு எப்படி உதவலாம்?",
-    "bn-IN": "নমস্কার! আমি আপনার মেড স্পা সহকারী। আজ আমি আপনাকে কীভাবে সাহায্য করতে পারি?",
-    "te-IN": "నమస్కారం! మల్లా రెడ్డి యూనివర్సిటీకి స్వాగతం. నేను అనన్య — కోర్సులు, అడ్మిషన్లు, ఫీజుల విషయంలో ఎలా సహాయం చేయాలి?",
-    "gu-IN": "નમસ્તે! હું તમારો મેડ સ્પા સહાયક છું. આજ હું તમારી કેવી રીતે મદદ કરી શકું?",
-    "kn-IN": "ನಮಸ್ಕಾರ! ನಾನು ನಿಮ್ಮ ಮೆಡ್ ಸ್ಪಾ ಸಹಾಯಕ. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?",
-    "ml-IN": "നമസ്കാരം! ഞാൻ നിങ്ങളുടെ മെഡ് സ്പാ അസിസ്റ്റന്റ് ആണ്. ഞാൻ നിങ്ങളെ എങ്ങനെ സഹായിക്കാം?",
-    "mr-IN": "नमस्कार! मी तुमचा मेड स्पा सहाय्यक आहे. आज मी तुम्हाला कशी मदद करू शकतो?",
-    "pa-IN": "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ ਤੁਹਾਡਾ ਮੇਡ ਸਪਾ ਸਹਾਇਕ ਹਾਂ। ਮੈਂ ਅੱਜ ਤੁਹਾਡੀ ਕਿਵੇਂ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ?",
-    "od-IN": "ନମସ୍କାର! ମୁଁ ଆପଣଙ୍କ ମେଡ ସ୍ପା ସହାୟକ। ଆଜି ମୁଁ ଆପଣଙ୍କୁ କିପରି ସାହାଯ୍ୟ କରିପାରିବି?",
-    "en-IN": "Hello! Welcome to Malla Reddy University. I'm Roopa, your admissions assistant. How can I help you today?",
-    "auto": "Hello! Namaste! Malla Reddy University mein swagat hai — నమస్కారం! Main Roopa hoon. Hindi, Telugu, ya English — kisi mein bhi baat karein!",
+    "hi-IN": "नमस्ते! मल्ला रेड्डी यूनिवर्सिटी में आपका स्वागत है। मैं अनन्या हूँ — कोर्स, एडमिशन, या फीस — बताइए कैसे मदद करूँ?",
+    "te-IN": "నమస్కారం! మల్లా రెడ్డి యూనివర్సిటీకి స్వాగతం. నేను అనన్య — ఎలా సహాయం చేయాలి?",
+    "en-IN": "Hello! Welcome to Malla Reddy University. I'm Ananya, your admissions assistant. How can I help you today?",
+    "ta-IN": "வணக்கம்! மல்லா ரெட்டி பல்கலைக்கழகத்திற்கு வரவேற்கிறோம். நான் அனன்யா — எப்படி உதவலாம்?",
+    "auto":  "Hello! Namaste! Malla Reddy University mein swagat hai — నమస్కారం! I'm Ananya. You can speak in Hindi, Telugu, or English.",
 }
 
 MED_SPA_SERVICES = "facials, laser treatments, Botox, skin care, hair removal, body contouring"
@@ -550,12 +540,12 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
         super().__init__(instructions=final_instructions, tools=tools)
 
     async def on_enter(self):
+        await asyncio.sleep(2.5)  # Wait for SIP RTP audio path to open
         greeting = (
             self._live_config.get("opening_greeting")
             or self._first_line
-            or "Namaste! Welcome. How can I help you today?"
+            or "Namaste! Malla Reddy University mein aapka swagat hai. Main Ananya hoon — kaise madad karoon?"
         )
-        # Use session.say() — direct TTS, no LLM, guaranteed to fire
         await self.session.say(greeting, allow_interruptions=True)
 
 
@@ -582,38 +572,29 @@ class AutoLanguageAgent(Agent):
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Fires after every user utterance. We detect language here."""
+        # Detect language once, lock it, update prompt — NO TTS swapping ever
         if not self.language_locked:
-            # Safely extract detected language from LiveKit STT speech data
-            detected = None
-            try:
-                # LiveKit exposes the SpeechData objects inside the ChatMessage metadata sometimes,
-                # or as an attribute on the message itself depending on the SDK version.
-                # The safest way is to just assume we check message.language or similar
-                detected = getattr(new_message, "language", None)
-            except Exception:
-                pass
+            detected = getattr(new_message, "language", None)
+            if not detected:
+                try:
+                    detected = new_message.content[0].language
+                except Exception:
+                    detected = None
 
-            if detected and detected != "unknown" and detected in LANGUAGE_CONFIG:
+            if detected and detected not in ("unknown", "", None) and detected in LANGUAGE_CONFIG:
                 self.detected_language = detected
                 self.language_locked = True
-                cfg = get_lang_config(detected)
-                logger.info("[LANG] Detected: %s (%s) — locking in", detected, cfg["name"])
-                
-                # Update system prompt to enforce the detected language
-                self.instructions = build_multilang_system_prompt(detected, self._base_instructions)
-                
-                # Swap TTS on the session if available
-                if self._session_ref is not None:
-                    try:
-                        self._session_ref._tts = sarvam.TTS(
-                            model="bulbul:v3",
-                            speaker=cfg["speaker"],
-                            target_language_code=cfg["tts_lang"],
-                            api_key=os.environ.get("SARVAM_API_KEY", ""),
-                        )
-                        logger.info("[LANG] TTS swapped to %s (speaker=%s)", cfg['name'], cfg['speaker'])
-                    except Exception as e:
-                        logger.warning("[LANG] TTS swap failed: %s", e)
+                lang_name = LANGUAGE_CONFIG[detected]["name"]
+                logger.info(f"LANG: Detected {detected} ({lang_name}) — updating prompt")
+
+                # Only update instructions — NEVER swap TTS voice
+                self.instructions = (
+                    self._base_instructions +
+                    f"\n\nLANGUAGE CONTEXT: The caller is speaking {lang_name}. "
+                    f"Reply in {lang_name}. You may also use Hindi and English naturally. "
+                    f"NEVER say you cannot speak English — you always can."
+                )
+
         await super().on_user_turn_completed(turn_ctx, new_message)
 
 
@@ -920,38 +901,22 @@ async def entrypoint(ctx: JobContext):
         active_llm = openai.LLM(model=llm_model, temperature=0.75)
 
     # ── Build STT (#9/#20) ────────────────────────────────────────────────
-    if stt_provider == "deepgram" and deepgram_plugin:
-        active_stt = deepgram_plugin.STT(
-            model="nova-2",
-            language="hi",
-            interim_results=False,
-        )
-    else:
-        active_stt = sarvam.STT(
-            language="unknown",   # auto-detect via Saaras v3
-            model="saaras:v3",
-            mode="transcribe",    # transcribe preserves original language for detection
-            high_vad_sensitivity=True,
-            sample_rate=16000,
-            flush_signal=True,
-            api_key=os.environ.get("SARVAM_API_KEY") or live_config.get("sarvam_api_key", ""),
-        )
+    # Remove ALL deepgram conditions — always use Saaras v3 for multilingual
+    active_stt = sarvam.STT(
+        language="unknown",   # Auto-detects Hindi, Telugu, English, Tamil, Bengali, etc.
+        model="saaras:v3",
+        mode="transcribe",
+        flush_signal=True,
+    )
 
     # ── Build TTS (#10) ───────────────────────────────────────────────────
-    if tts_provider == "elevenlabs" and elevenlabs_plugin:
-        active_tts = elevenlabs_plugin.TTS(
-            model="eleven_turbo_v2_5",
-            voice_id=live_config.get("elevenlabs_voice_id", "21m00Tcm4TlvDq8ikWAM"),
-        )
-    else:
-        active_tts = sarvam.TTS(
-            target_language_code=tts_language,
-            model="bulbul:v3",
-            speaker=tts_voice,
-            enable_preprocessing=True,
-            pace=0.95,
-            api_key=os.environ.get("SARVAM_API_KEY") or live_config.get("sarvam_api_key", ""),
-        )
+    active_tts = sarvam.TTS(
+        model="bulbul:v3",
+        speaker="roopa",           # Single voice always — no swapping
+        target_language_code="te-IN",
+        enable_preprocessing=True,
+        pace=0.95,
+    )
 
     # ── Build agent ───────────────────────────────────────────────────────
     agent = OutboundAssistant(agent_tools=agent_tools, first_line=first_line, live_config=live_config)
@@ -1100,13 +1065,31 @@ async def entrypoint(ctx: JobContext):
         last_agent_speak_time = time.time()
         logger.debug("[STATE] Agent speaking: True")
 
+    @session.on("agent_speech_stopped")
+    def _agent_speech_stopped(ev):
+        global agent_is_speaking
+        agent_is_speaking = False
+        logger.debug("[STATE] Agent speaking: False (stopped)")
+
+    # Watchdog — force-resets stuck flag every 8 seconds
+    async def _speaking_watchdog():
+        global agent_is_speaking
+        while True:
+            await asyncio.sleep(8)
+            if agent_is_speaking:
+                agent_is_speaking = False
+                logger.warning("WATCHDOG: agent_is_speaking force-reset")
+
+    asyncio.create_task(_speaking_watchdog())
 
     # ── #30 Interrupt counter ─────────────────────────────────────────────
     interrupt_count = 0
 
     @session.on("agent_speech_interrupted")
     def on_interrupted(ev):
+        global agent_is_speaking
         nonlocal interrupt_count
+        agent_is_speaking = False
         interrupt_count += 1
         logger.info(f"[INTERRUPT] Agent interrupted. Total: {interrupt_count}")
 
