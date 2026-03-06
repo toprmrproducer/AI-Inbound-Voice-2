@@ -95,7 +95,7 @@ def init_db():
                 );
 
                 CREATE TABLE IF NOT EXISTS campaigns (
-                    id SERIAL PRIMARY KEY,
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     name TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'draft',
                     phone_numbers TEXT NOT NULL DEFAULT '',
@@ -143,6 +143,39 @@ def init_db():
                     start_time TIMESTAMPTZ NOT NULL,
                     notes TEXT,
                     created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            # ── 1.5. Fix campaign_targets type mismatch ───────────────────────
+            cur.execute("""
+                DO $$
+                BEGIN
+                    -- Drop and recreate campaign_targets only if campaign_id is wrong type
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'campaign_targets'
+                        AND column_name = 'campaign_id'
+                        AND data_type = 'integer'
+                    ) AND EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'campaigns'
+                        AND column_name = 'id'
+                        AND data_type = 'uuid'
+                    ) THEN
+                        DROP TABLE IF EXISTS campaign_targets CASCADE;
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_targets (
+                    id SERIAL PRIMARY KEY,
+                    campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
+                    phone TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER DEFAULT 0,
+                    last_attempt_at TIMESTAMPTZ,
+                    scheduled_time TIMESTAMPTZ
                 );
             """)
 

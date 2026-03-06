@@ -2334,7 +2334,7 @@ async function loadCampaigns() {{
   try {{
     const [agentsData, trunksData] = await Promise.all([
       fetch('/api/agents').then(r=>r.json()),
-      fetch('/api/sip-trunks').then(r=>r.json()).catch(()=>({trunks:[]}))
+      fetch('/api/sip-trunks').then(r=>r.json()).catch(()=>({{trunks:[]}}))
     ]);
     const asel = document.getElementById('camp-agent-id');
     if (asel) {{
@@ -2348,7 +2348,7 @@ async function loadCampaigns() {{
     }}
   }} catch(e) {{ /* ignore */ }}
 
-  const data = await fetch('/api/campaigns').then(r=>r.json()).catch(()=>({campaigns:[]}));
+  const data = await fetch('/api/campaigns').then(r=>r.json()).catch(()=>({{campaigns:[]}}));
   const campaigns = data.campaigns || [];
   if (!campaigns.length) {{
     el.innerHTML = '<div class="section-card" style="color:var(--muted)">No campaigns yet. Click "+ New Campaign" to create one.</div>';
@@ -2357,7 +2357,7 @@ async function loadCampaigns() {{
 
   // Load stats for each campaign
   const statsAll = await Promise.all(campaigns.map(c =>
-    fetch(`/api/campaigns/${{c.id}}/stats`).then(r=>r.json()).catch(()=>({leads:{{total:0,pending:0,calling:0,completed:0,failed:0}}}))
+    fetch(`/api/campaigns/${{c.id}}/stats`).then(r=>r.json()).catch(()=>({{leads:{{total:0,pending:0,calling:0,completed:0,failed:0}}}}))
   ));
 
   el.innerHTML = campaigns.map((c, idx) => {{
