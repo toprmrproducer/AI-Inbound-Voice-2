@@ -16,7 +16,34 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            # ── 1. Core tables (CREATE IF NOT EXISTS) ────────────────────────
+            # ── 1. Fix campaign_targets and leads type mismatch ───────────────
+            cur.execute("""
+                DO $$
+                BEGIN
+                    -- Drop and recreate campaign_targets if campaign_id is wrong type
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'campaign_targets'
+                        AND column_name = 'campaign_id'
+                        AND data_type = 'integer'
+                    ) THEN
+                        DROP TABLE IF EXISTS campaign_targets CASCADE;
+                    END IF;
+
+                    -- Drop and recreate leads if campaign_id is wrong type
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'leads'
+                        AND column_name = 'campaign_id'
+                        AND data_type = 'integer'
+                    ) THEN
+                        DROP TABLE IF EXISTS leads CASCADE;
+                    END IF;
+                END $$;
+            """)
+            conn.commit()
+
+            # ── 2. Core tables (CREATE IF NOT EXISTS) ────────────────────────
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS call_logs (
                     id SERIAL PRIMARY KEY,
@@ -113,7 +140,7 @@ def init_db():
 
                 CREATE TABLE IF NOT EXISTS campaign_targets (
                     id SERIAL PRIMARY KEY,
-                    campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+                    campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
                     phone TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
                     attempts INTEGER DEFAULT 0,
@@ -123,7 +150,7 @@ def init_db():
 
                 CREATE TABLE IF NOT EXISTS leads (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+                    campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
                     phone TEXT NOT NULL,
                     name TEXT,
                     email TEXT,
@@ -145,39 +172,7 @@ def init_db():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
-
-            # ── 1.5. Fix campaign_targets type mismatch ───────────────────────
-            cur.execute("""
-                DO $$
-                BEGIN
-                    -- Drop and recreate campaign_targets only if campaign_id is wrong type
-                    IF EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'campaign_targets'
-                        AND column_name = 'campaign_id'
-                        AND data_type = 'integer'
-                    ) AND EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'campaigns'
-                        AND column_name = 'id'
-                        AND data_type = 'uuid'
-                    ) THEN
-                        DROP TABLE IF EXISTS campaign_targets CASCADE;
-                    END IF;
-                END $$;
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS campaign_targets (
-                    id SERIAL PRIMARY KEY,
-                    campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
-                    phone TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    attempts INTEGER DEFAULT 0,
-                    last_attempt_at TIMESTAMPTZ,
-                    scheduled_time TIMESTAMPTZ
-                );
-            """)
+            conn.commit()
 
             # ── 2. Indexes ────────────────────────────────────────────────────
             cur.execute("""

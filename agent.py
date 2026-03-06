@@ -724,7 +724,7 @@ async def run_demo_session(ctx: JobContext):
     agent._session_ref = session
 
     # Pass explicit participant so STT subscribes to their mic track, not a SIP trunk
-    await session.start(room=ctx.room, agent=agent, participant=visitor)
+    await session.start(room=ctx.room, agent=agent)
 
     logger.info("[DEMO] Session live.")
 
@@ -1019,7 +1019,6 @@ async def entrypoint(ctx: JobContext):
         room=ctx.room,
         agent=agent,
         room_input_options=_room_input_opts,
-        participant=sip_participant,  # Binds STT to the caller's audio track
     )
 
     # #12 — TTS pre-warming
