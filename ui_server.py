@@ -975,9 +975,10 @@ async def api_agents_list():
     agents = db.get_agents()
     if not agents:
         cfg = read_config()
+        default_name = cfg.get("agent_name", "Ananya — Malla Reddy University")
         db.create_agent(
             agent_id="default",
-            name="Daisy — Med Spa (Default)",
+            name=default_name,
             stt_language=cfg.get("stt_language", "hi-IN"),
             tts_language=cfg.get("tts_language", "hi-IN"),
             tts_voice=cfg.get("tts_voice", "rohan"),
@@ -2156,14 +2157,16 @@ async function saveConfig(section) {{
 
   const payload = {{}};
 
-  if (section === 'agent') {{
+  if (section === 'agent' || section === 'system') {{
     Object.assign(payload, {{
+      agent_name: get('agentName'),
+      opening_greeting: get('greeting'),
       first_line: get('first_line'),
-      agent_instructions: get('agent_instructions'),
+      agent_instructions: get('agent_instructions') || get('instructions'),
       stt_min_endpointing_delay: parseFloat(get('stt_min_endpointing_delay')),
-      tts_voice: get('tts_voice'),
+      tts_voice: get('ttsVoice') || get('tts_voice'),
       tts_language: get('tts_language'),
-      stt_language: get('tts_language') || 'hi-IN',
+      stt_language: get('sttModel') || get('tts_language') || 'unknown',
     }});
   }} else if (section === 'models') {{
     Object.assign(payload, {{

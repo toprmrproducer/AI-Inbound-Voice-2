@@ -547,18 +547,31 @@ class AutoLanguageAgent(Agent):
                 except Exception:
                     detected = None
 
+            # Only accept confident detections (not "unknown")
             if detected and detected not in ("unknown", "", None) and detected in LANGUAGE_CONFIG:
-                self.detected_language = detected
-                self.language_locked = True
                 lang_name = LANGUAGE_CONFIG[detected]["name"]
-                logger.info(f"LANG: Detected {detected} ({lang_name}) — updating prompt")
+                
+                # Require same language detected twice in a row before locking
+                if not hasattr(self, '_candidate_lang'):
+                    self._candidate_lang = detected
+                    self._candidate_count = 1
+                elif self._candidate_lang == detected:
+                    self._candidate_count += 1
+                else:
+                    self._candidate_lang = detected
+                    self._candidate_count = 1
 
-                self.instructions = (
-                    self._base_instructions +
-                    f"\n\nLANGUAGE CONTEXT: The caller is speaking {lang_name}. "
-                    f"Respond naturally in {lang_name}, and you MAY also use Hindi and English when helpful. "
-                    f"Never say you cannot speak English."
-                )
+                if self._candidate_count >= 2:
+                    self.detected_language = detected
+                    self.language_locked = True
+                    logger.info(f"[LANG] Locked to {detected} ({lang_name}) after 2 confirmations")
+                    # Soft prompt update — never forbids English
+                    self.instructions = (
+                        self._base_instructions
+                        + f"\n\nThe caller is speaking {lang_name}. "
+                        f"Reply in {lang_name}. You may also use English naturally. "
+                        f"Never say you cannot speak English."
+                    )
 
         await super().on_user_turn_completed(turn_ctx, new_message)
 
@@ -629,22 +642,12 @@ async def run_demo_session(ctx: JobContext):
         tts=demo_tts,
         vad=vad,
         turn_detection="stt",
-        min_interruption_duration=0.0,
-        min_interruption_words=0,
-        min_endpointing_delay=live_config.get("stt_min_endpointing_delay", 0.5),
+        min_interruption_duration=0.6,
+        min_interruption_words=3,
+        min_endpointing_delay=live_config.get("stt_min_endpointing_delay", 0.7),
         preemptive_generation=True,
         allow_interruptions=True,
     )
-
-    @session.on("user_speech_started")
-    def on_user_speech_started_demo():
-        session.interrupt()
-        logger.info("[INTERRUPT] Hard interrupt triggered on speech start (demo)")
-
-    @session.on("user_speech_committed")
-    def on_user_speech_committed_demo(ev):
-        if getattr(ev, "transcript", "") and len(ev.transcript) > 2:
-            session.interrupt()
 
     # Find visitor participant — check existing first, then wait for them
     visitor = None
@@ -683,6 +686,13 @@ async def run_demo_session(ctx: JobContext):
 # ══════════════════════════════════════════════════════════════════════════════
 # JOB ENTRYPOINT
 # ══════════════════════════════════════════════════════════════════════════════
+
+def extract_phone_from_room(room_name: str) -> str | None:
+    parts = room_name.split('_')
+    for part in parts:
+        if part.startswith('+') and len(part) >= 10:
+            return part
+    return None
 
 async def entrypoint(ctx: JobContext):
     logger.info(f"[JOB] id={ctx.job.id}")
@@ -726,6 +736,9 @@ async def entrypoint(ctx: JobContext):
 
     # ── Rate limiting (#37) ────────────────────────────────────────────────
     caller_phone = phone_number or "unknown"
+    if not caller_phone or caller_phone in ("unknown", "None", ""):
+        caller_phone = extract_phone_from_room(ctx.room.name) or "unknown"
+
     if is_rate_limited(caller_phone):
         logger.warning(f"[RATE-LIMIT] Blocked {caller_phone} — too many calls in window")
         return
@@ -795,10 +808,15 @@ async def entrypoint(ctx: JobContext):
     # ── Instantiate tools ─────────────────────────────────────────────────
     caller_phone = phone_number or "unknown"
 
-    # #32 — Extract name from SIP Caller-ID if available
     for identity, participant in ctx.room.remote_participants.items():
-        if participant.name and participant.name not in ["", "Caller", "Unknown"]:
-            caller_name = participant.name
+        raw_name = participant.name or ""
+        if raw_name.startswith("Phone "):
+            caller_phone = raw_name.replace("Phone ", "").strip()
+            caller_name = ""
+            logger.info(f"[CALLER-ID] Name from SIP: Phone {caller_phone}")
+            break
+        elif raw_name and raw_name not in ["", "Caller", "Unknown"]:
+            caller_name = raw_name
             logger.info(f"[CALLER-ID] Name from SIP: {caller_name}")
             break
 
@@ -914,22 +932,12 @@ async def entrypoint(ctx: JobContext):
         tts=active_tts,
         vad=vad,
         turn_detection="stt",
-        min_interruption_duration=0.0,
-        min_interruption_words=0,
-        min_endpointing_delay=delay_setting if delay_setting else 0.5,
+        min_interruption_duration=0.6,
+        min_interruption_words=3,
+        min_endpointing_delay=delay_setting if delay_setting else 0.7,
         preemptive_generation=True,
         allow_interruptions=True,
     )
-
-    @session.on("user_speech_started")
-    def on_user_speech_started_main():
-        session.interrupt()
-        logger.info("[INTERRUPT] Hard interrupt triggered on speech start")
-
-    @session.on("user_speech_committed")
-    def on_user_speech_committed_main(ev):
-        if getattr(ev, "transcript", "") and len(ev.transcript) > 2:
-            session.interrupt()
 
 
     # ── Fix #2: Resolve SIP participant so STT subscribes to the correct audio track ──
@@ -999,28 +1007,36 @@ async def entrypoint(ctx: JobContext):
     import time
     last_agent_speak_time = time.time()
 
-    async def silence_watchdog():
-        """Nudge the caller after 20s of silence. Hang up after 2 unanswered nudges."""
-        nonlocal last_agent_speak_time
-        nudge_count = 0
-        MAX_NUDGES = 2
-        SILENCE_THRESHOLD = 20  # seconds before first nudge
-        while True:
-            await asyncio.sleep(5)
-            if time.time() - last_agent_speak_time > SILENCE_THRESHOLD:
-                nudge_count += 1
-                if nudge_count >= MAX_NUDGES:
-                    logger.info("[WATCHDOG] Max nudges reached — hanging up.")
-                    await session.say("It seems you cannot hear me. I will end this call now. Goodbye!")
-                    await agent_tools.end_call()
-                    return
-                logger.info(f"[WATCHDOG] {SILENCE_THRESHOLD}s silence — nudge #{nudge_count}")
-                await session.say("Are you still there? You can speak anytime.")
-                last_agent_speak_time = time.time()
-                await asyncio.sleep(SILENCE_THRESHOLD)  # reset window after nudge
+    GREETING_DONE = asyncio.Event()
+    last_user_speech_time = [time.time()]
 
-    # Watchdog starts AFTER the greeting (on_enter will fire and update last_agent_speak_time)
-    watchdog_task = asyncio.create_task(silence_watchdog())
+    @session.on("user_speech_started")
+    def _on_any_speech():
+        last_user_speech_time[0] = time.time()
+
+    @session.on("user_speech_committed")
+    def _on_committed(ev):
+        last_user_speech_time[0] = time.time()
+
+    async def _silence_watchdog():
+        await GREETING_DONE.wait()
+        await asyncio.sleep(5)
+        nudge_count = 0
+        while True:
+            await asyncio.sleep(10)
+            silence_secs = time.time() - last_user_speech_time[0]
+            if silence_secs > 25:
+                nudge_count += 1
+                if nudge_count == 1:
+                    await session.say("Hello? Are you still there?", allow_interruptions=True)
+                    logger.info("[WATCHDOG] 25s silence — nudge #1")
+                elif nudge_count == 2:
+                    await session.say("I'll call you back later. Goodbye!", allow_interruptions=False)
+                    logger.info("[WATCHDOG] Max nudges — hanging up.")
+                    await agent_tools.end_call()
+                    break
+
+    watchdog_task = asyncio.create_task(_silence_watchdog())
 
     @session.on("agent_speech_started")
     def _agent_speech_started(ev):

@@ -313,6 +313,8 @@ def get_agent_by_id(agent_id: str) -> dict:
         return None
 
 
+import uuid as _uuid
+
 def create_agent(agent_id, name,
                  stt_provider="sarvam", stt_language="hi-IN",
                  llm_provider="openai", llm_model="gpt-4o-mini",
@@ -321,6 +323,10 @@ def create_agent(agent_id, name,
                  max_turns=20) -> dict:
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            real_id = agent_id if (
+                agent_id and agent_id != "default"
+            ) else str(_uuid.uuid4())
+
             cur.execute("""
                 INSERT INTO agents (
                     id, name,
@@ -330,9 +336,22 @@ def create_agent(agent_id, name,
                     first_line, system_prompt, agent_instructions, max_turns
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    stt_provider = EXCLUDED.stt_provider,
+                    stt_language = EXCLUDED.stt_language,
+                    llm_provider = EXCLUDED.llm_provider,
+                    llm_model = EXCLUDED.llm_model,
+                    tts_provider = EXCLUDED.tts_provider,
+                    tts_voice = EXCLUDED.tts_voice,
+                    tts_language = EXCLUDED.tts_language,
+                    first_line = EXCLUDED.first_line,
+                    system_prompt = EXCLUDED.system_prompt,
+                    agent_instructions = EXCLUDED.agent_instructions,
+                    max_turns = EXCLUDED.max_turns
                 RETURNING *
             """, (
-                agent_id, name,
+                real_id, name,
                 stt_provider, stt_language,
                 llm_provider, llm_model,
                 tts_provider, tts_voice, tts_language,
