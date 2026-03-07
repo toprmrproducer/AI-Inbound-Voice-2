@@ -136,41 +136,8 @@ def get_lang_config(lang_code: str) -> dict:
 def get_multilingual_greeting(lang: str) -> str:
     return GREETINGS.get(lang, GREETINGS["auto"])
 
-def build_multilang_system_prompt(lang_code: str, base_instructions: str = "") -> str:
-    """Build a language-locked system prompt for the given detected language."""
-    cfg = get_lang_config(lang_code)
-    lang_name = cfg["name"]
-    
-    # If the user is speaking Hindi or English, teach the agent to use Hinglish (the most common Indian conversational style)
-    # If the user speaks Tamil/Telugu/etc, lock strictly into that language.
-    if lang_code in ("hi-IN", "en-IN"):
-        language_rule = """
-CRITICAL LANGUAGE RULE:
-You MUST speak in a natural "Hinglish" mix (Hindi and English).
-- When the user speaks Hindi, reply in Hindi but you can use English medical/spa terms.
-- When the user speaks English, reply in English but you can occasionally use a Hindi greeting.
-- Keep the tone warm and conversational.
-"""
-    else:
-        language_rule = f"""
-CRITICAL LANGUAGE RULE — NON-NEGOTIABLE:
-You MUST speak ONLY in {lang_name}.
-NEVER switch to Hindi, English, or any other language unless there is absolutely no {lang_name} equivalent for a medical term (in which case use the English word only for that term).
-Even if the user mixes languages, ALWAYS reply in {lang_name}.
-"""
 
-    core = f"""
-STYLE & TONE:
-- Speak like a friendly human, not a bot.
-- Use natural short fillers like "umm", "hmm", "acha", "theek hai", "ok" where it feels natural.
-- Use fillers sparingly: at most one filler per response.
-- Keep responses short: max 2 sentences, 4–18 words per sentence.
-- Use contractions and casual Hinglish/Tamil/English depending on caller language.
-- Never say you are an AI or a bot.
-═══════════════════════════════════════════
 
-"""
-    return (base_instructions or "") + core
 
 
 def get_live_config(phone_number: str = None):
@@ -568,11 +535,10 @@ class AutoLanguageAgent(Agent):
         self.detected_language: str | None = None
         self.language_locked = False
         self._session_ref = None          # set after session.start()
-        super().__init__(instructions=base_instructions or build_multilang_system_prompt("hi-IN", base_instructions))
+        super().__init__(instructions=base_instructions or "")
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Fires after every user utterance. We detect language here."""
-        # Detect language once, lock it, update prompt — NO TTS swapping ever
         if not self.language_locked:
             detected = getattr(new_message, "language", None)
             if not detected:
@@ -587,12 +553,11 @@ class AutoLanguageAgent(Agent):
                 lang_name = LANGUAGE_CONFIG[detected]["name"]
                 logger.info(f"LANG: Detected {detected} ({lang_name}) — updating prompt")
 
-                # Only update instructions — NEVER swap TTS voice
                 self.instructions = (
                     self._base_instructions +
                     f"\n\nLANGUAGE CONTEXT: The caller is speaking {lang_name}. "
-                    f"Reply in {lang_name}. You may also use Hindi and English naturally. "
-                    f"NEVER say you cannot speak English — you always can."
+                    f"Respond naturally in {lang_name}, and you MAY also use Hindi and English when helpful. "
+                    f"Never say you cannot speak English."
                 )
 
         await super().on_user_turn_completed(turn_ctx, new_message)
