@@ -170,7 +170,42 @@ async def api_post_config(request: Request):
     data = await request.json()
     write_config(data)
     logger.info("Configuration updated via UI.")
-    return {"status": "success"}
+    return read_config()
+
+@app.post("/api/analyze-prompt")
+async def api_analyze_prompt(request: Request):
+    data = await request.json()
+    prompt = data.get("prompt", "")
+    try:
+        import tiktoken
+        enc = tiktoken.encoding_for_model("gpt-4o")
+        token_count = len(enc.encode(prompt))
+    except Exception:
+        token_count = len(prompt.split()) * 4 // 3  # rough fallback
+
+    if token_count < 60:
+        status = "too_short"
+        message = "Prompt is too short. The agent will have no context to work from."
+        recommendation = "Add your business description, services, tone, and rules. Aim for 150–400 tokens."
+    elif token_count <= 400:
+        status = "healthy"
+        message = f"Prompt looks good at {token_count} tokens."
+        recommendation = "Healthy range. Make sure max_tokens ≥ 150 for clean responses."
+    elif token_count <= 800:
+        status = "large"
+        message = f"Prompt is large at {token_count} tokens. Latency may increase slightly."
+        recommendation = "Set max_tokens to at least 300. Consider trimming redundant instructions."
+    else:
+        status = "too_large"
+        message = f"Prompt is {token_count} tokens — very large. Expect higher latency and LLM cost."
+        recommendation = "Trim aggressively. Move static info to tools. Keep core instructions under 600 tokens."
+
+    return {
+        "token_count": token_count,
+        "status": status,
+        "message": message,
+        "recommendation": recommendation,
+    }
 
 @app.get("/api/logs")
 async def api_get_logs():
@@ -991,30 +1026,40 @@ def api_get_agents():
     return {"agents": db.get_all_agents()}
 
 @app.post("/api/agents")
-async def api_create_agent(req: Request):
+async def api_agents_create(request: Request):
     import db
-    data = await req.json()
-    new_agent = db.create_agent(
-        name=data.get("name", "New Agent"),
-        subtitle=data.get("subtitle", ""),
-        config=data.get("config", {}),
-        stt_provider=data.get("stt_provider", "sarvam"),
-        phone_numbers=data.get("phone_numbers", [])
-    )
-    return {"status": "ok", "agent": new_agent}
+    import uuid
+    from fastapi import HTTPException
+    data = await request.json()
+    try:
+        agent = db.create_agent(
+            agent_id=str(uuid.uuid4()),
+            name=data.get("name", "New Agent"),
+            sttprovider=data.get("sttprovider", "sarvam"),
+            sttlanguage=data.get("sttlanguage", "hi-IN"),
+            llmprovider=data.get("llmprovider", "openai"),
+            llmmodel=data.get("llmmodel", "gpt-4o-mini"),
+            ttsprovider=data.get("ttsprovider", "sarvam"),
+            ttsvoice=data.get("ttsvoice", "rohan"),
+            ttslanguage=data.get("ttslanguage", "hi-IN"),
+            firstline=data.get("firstline", ""),
+            openinggreeting=data.get("openinggreeting", ""),
+            agentinstructions=data.get("agentinstructions", data.get("systemprompt", "")),
+            temperature=float(data.get("temperature", 0.3)),
+            max_tokens=int(data.get("max_tokens", 250)),
+            maxturns=int(data.get("maxturns", 20)),
+        )
+        return agent
+    except Exception as e:
+        logger.error(f"create_agent failed: {e}")
+        from fastapi import HTTPException
+        raise HTTPException(500, f"Failed to create agent: {str(e)}")
 
 @app.put("/api/agents/{agent_id}")
 async def api_update_agent(agent_id: str, req: Request):
     import db
     data = await req.json()
-    updated = db.update_agent(
-        agent_id,
-        name=data.get("name"),
-        subtitle=data.get("subtitle"),
-        config=data.get("config"),
-        stt_provider=data.get("stt_provider"),
-        phone_numbers=data.get("phone_numbers")
-    )
+    updated = db.update_agent(agent_id, data)
     return {"status": "ok", "agent": updated}
 
 @app.post("/api/agents/{agent_id}/activate")
@@ -1322,8 +1367,33 @@ async def get_dashboard():
         <option value="gpt-4.1-mini">gpt-4.1-mini (Latest Fast)</option>
       </select>
     </div>
-    <div class="form-group"><label>First Line (Opening Greeting)</label><input type="text" id="am-first-line" placeholder="Namaste! Welcome to..."></div>
-    <div class="form-group"><label>System Instructions</label><textarea id="am-instructions" rows="6" placeholder="You are..."></textarea></div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Temperature</label>
+        <input type="number" id="am-temperature" min="0" max="2" step="0.05" placeholder="0.3" value="0.3">
+        <small style="color:var(--muted);font-size:11px">0.0 = focused, 1.0 = creative</small>
+      </div>
+      <div class="form-group">
+        <label>Max Tokens</label>
+        <input type="number" id="am-max-tokens" min="50" max="2000" step="50" placeholder="250" value="250">
+        <small style="color:var(--muted);font-size:11px">Max words agent can reply with</small>
+      </div>
+    </div>
+    <div class="form-group"><label>First Line (Fallback)</label><input type="text" id="am-first-line" placeholder="Namaste! Welcome to..."></div>
+    <div class="form-group">
+      <label>Opening Greeting (spoken immediately on connect)</label>
+      <input type="text" id="am-opening-greeting" placeholder="Namaste! Welcome to...">
+    </div>
+    <div class="form-group">
+      <label>System Instructions</label>
+      <textarea id="am-instructions" rows="6" placeholder="You are..."></textarea>
+      <!-- Prompt Analyzer badge — shown live as user types in instructions -->
+      <div id="prompt-analyzer-badge" style="margin-top:8px;padding:10px 14px;border-radius:10px;font-size:13px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);display:none;">
+        <span id="pa-token-count" style="font-weight:700"></span>
+        <span id="pa-status-label" style="margin-left:8px;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700"></span>
+        <div id="pa-recommendation" style="margin-top:6px;color:var(--muted);font-size:12px"></div>
+      </div>
+    </div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
       <button class="btn btn-ghost" onclick="closeAgentModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveAgent()">💾 Save Agent</button>
@@ -1376,8 +1446,8 @@ async def get_dashboard():
       </svg>
     </div>
     <div>
-      <div class="brand-text">{agent_name_display}</div>
-      <div class="brand-sub">{agent_subtitle_display}</div>
+      <div class="brand-text" id="sidebar-brand-name">{agent_name_display}</div>
+      <div class="brand-sub" id="sidebar-subtitle">{agent_subtitle_display}</div>
     </div>
   </div>
   <div class="sidebar-nav">
@@ -2141,48 +2211,57 @@ async function loadCRM() {{
 
 // ── Save Config ─────────────────────────────────────────────────────────────
 async function saveConfig(section) {{
-  const get = id => {{ const el = document.getElementById(id); return el ? el.value : null; }};
-
+  const get = id => {{
+    const el = document.getElementById(id);
+    return el ? el.value : null;
+  }};
   const payload = {{}};
-
   if (section === 'agent' || section === 'system') {{
     Object.assign(payload, {{
-      agent_name: get('agentName'),
-      opening_greeting: get('greeting'),
-      first_line: get('first_line'),
-      agent_instructions: get('agent_instructions') || get('instructions'),
-      stt_min_endpointing_delay: parseFloat(get('stt_min_endpointing_delay')),
-      tts_voice: get('ttsVoice') || get('tts_voice'),
-      tts_language: get('tts_language'),
-      stt_language: get('sttModel') || get('tts_language') || 'unknown',
+      firstline: get('firstline'),
+      openinggreeting: get('openinggreeting'),
+      agentinstructions: get('agentinstructions') || get('instructions'),
+      sttminendpointingdelay: parseFloat(get('sttminendpointingdelay') || get('stt_min_endpointing_delay')),
+      ttsvoice: get('ttsvoice') || get('ttsVoice') || get('tts_voice'),
+      ttslanguage: get('ttslanguage') || get('tts_language'),
+      sttlanguage: get('ttslanguage') || get('sttModel') || get('tts_language') || 'hi-IN',
     }});
   }} else if (section === 'models') {{
     Object.assign(payload, {{
-      llm_model: get('llm_model'),
+      llmmodel: get('llmmodel') || get('llm_model'),
+      temperature: parseFloat(get('temperature') || '0.3'),
+      max_tokens: parseInt(get('max_tokens') || '250'),
     }});
   }} else if (section === 'credentials') {{
     Object.assign(payload, {{
-      livekit_url: get('livekit_url'), sip_trunk_id: get('sip_trunk_id'),
-      livekit_api_key: get('livekit_api_key'), livekit_api_secret: get('livekit_api_secret'),
-      openai_api_key: get('openai_api_key'), sarvam_api_key: get('sarvam_api_key'),
-      cal_api_key: get('cal_api_key'), cal_event_type_id: get('cal_event_type_id'),
-      telegram_bot_token: get('telegram_bot_token'), telegram_chat_id: get('telegram_chat_id'),
-      supabase_url: get('supabase_url'), supabase_key: get('supabase_key'),
-      vobiz_sip_domain: get('vobiz_sip_domain'), vobiz_username: get('vobiz_username'),
-      vobiz_password: get('vobiz_password'), vobiz_outbound_number: get('vobiz_outbound_number'),
-      vobiz_number_pool: get('vobiz_number_pool'),
+      livekiturl: get('livekit_url'), siptrunkid: get('sip_trunk_id'),
+      livekitapikey: get('livekit_api_key'), livekitapisecret: get('livekit_api_secret'),
+      openaiapikey: get('openai_api_key'), sarvamapikey: get('sarvam_api_key'),
+      calapikey: get('cal_api_key'), caleventtypeid: get('cal_event_type_id'),
+      telegrambottoken: get('telegram_bot_token'), telegramchatid: get('telegram_chat_id'),
+      supabaseurl: get('supabase_url'), supabasekey: get('supabase_key'),
+      vobizsipdomain: get('vobiz_sip_domain'), vobizusername: get('vobiz_username'),
+      vobizpassword: get('vobiz_password'), vobizoutboundnumber: get('vobiz_outbound_number'),
+      vobiznumberpool: get('vobiz_number_pool'),
     }});
   }}
 
   const res = await fetch('/api/config', {{
-    method: 'POST', headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify(payload)
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify(payload),
   }});
 
-  const statusEl = document.getElementById('save-status-' + section);
+  const saved = await res.json();  // server now returns full config
+  const statusEl = document.getElementById(`save-status-${{section}}`);
+
   if (res.ok) {{
-    statusEl.style.opacity = '1';
-    setTimeout(() => {{ statusEl.style.opacity = '0'; }}, 2500);
+    // Repopulate fields from server response so UI shows what was actually saved
+    Object.entries(saved).forEach(([key, val]) => {{
+      const el = document.getElementById(key);
+      if (el && val !== null && val !== undefined) el.value = val;
+    }});
+    if (statusEl) {{ statusEl.style.opacity = 1; setTimeout(() => statusEl.style.opacity = 0, 2500); }}
   }} else {{
     alert('Failed to save. Check server logs.');
   }}
@@ -2247,26 +2326,67 @@ async function deleteAgent(id) {{
 }}
 function editAgent(agent) {{
   editingAgentId = agent.id;
-  ['am-name','am-tts-lang','am-voice','am-llm','am-first-line','am-instructions'].forEach(id => {{
-    const el=document.getElementById(id); if(!el) return;
-    const key = {{
-      'am-name':'name','am-tts-lang':'tts_language','am-voice':'tts_voice',
-      'am-llm':'llm_model','am-first-line':'first_line','am-instructions':'agent_instructions'
-    }}[id];
-    if (key) el.value = agent[key]||'';
-  }});
+  const setVal = (id, val) => {{ const el = document.getElementById(id); if (el) el.value = val ?? ''; }};
+  setVal('am-name', agent.name);
+  setVal('am-tts-lang', agent.ttslanguage || agent.tts_language);
+  setVal('am-voice', agent.ttsvoice || agent.tts_voice);
+  setVal('am-llm', agent.llmmodel || agent.llm_model);
+  setVal('am-first-line', agent.firstline || agent.first_line);
+  setVal('am-opening-greeting', agent.openinggreeting);
+  setVal('am-instructions', agent.agentinstructions || agent.agent_instructions);
+  setVal('am-temperature', agent.temperature ?? 0.3);
+  setVal('am-max-tokens', agent.max_tokens ?? 250);
   document.getElementById('agent-modal').classList.add('open');
 }}
 function openAgentModal() {{ editingAgentId=null; document.getElementById('agent-modal').classList.add('open'); }}
 function closeAgentModal() {{ document.getElementById('agent-modal').classList.remove('open'); }}
 async function saveAgent() {{
-  const g = id => {{ const e=document.getElementById(id); return e?e.value:''; }};
-  const data = {{ name:g('am-name'), tts_language:g('am-tts-lang'), stt_language:g('am-tts-lang'),
-    tts_voice:g('am-voice'), llm_model:g('am-llm'), first_line:g('am-first-line'), agent_instructions:g('am-instructions') }};
-  const url = editingAgentId ? '/api/agents/'+editingAgentId : '/api/agents';
+  const g = id => document.getElementById(id)?.value;
+  const data = {{
+    name: g('am-name'),
+    ttslanguage: g('am-tts-lang'),
+    sttlanguage: g('am-tts-lang'),
+    ttsvoice: g('am-voice'),
+    llmmodel: g('am-llm'),
+    firstline: g('am-first-line'),
+    openinggreeting: g('am-opening-greeting'),
+    agentinstructions: g('am-instructions'),
+    temperature: parseFloat(g('am-temperature') || '0.3'),
+    max_tokens: parseInt(g('am-max-tokens') || '250'),
+  }};
+  const url = editingAgentId ? `/api/agents/${{editingAgentId}}` : '/api/agents';
   const method = editingAgentId ? 'PUT' : 'POST';
-  await fetch(url,{{method,headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}});
-  closeAgentModal(); loadAgents();
+  const res = await fetch(url, {{ method, headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(data) }});
+  if (!res.ok) {{ alert('Save failed. Check server logs.'); return; }}
+  closeAgentModal();
+  loadAgents();
+}}
+
+// Prompt analyzer — fires as user types in the instructions textarea
+document.getElementById('am-instructions')?.addEventListener('input', debounce(async function() {{
+  const prompt = this.value.trim();
+  const badge = document.getElementById('prompt-analyzer-badge');
+  if (!prompt) {{ badge.style.display = 'none'; return; }}
+  badge.style.display = 'block';
+  try {{
+    const r = await fetch('/api/analyze-prompt', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ prompt }}),
+    }});
+    const d = await r.json();
+    const colors = {{ healthy: '#4ade80', large: '#fbbf24', too_large: '#f87171', too_short: '#a78bfa' }};
+    document.getElementById('pa-token-count').textContent = `${{d.token_count}} tokens`;
+    const sl = document.getElementById('pa-status-label');
+    sl.textContent = d.status.replace('_', ' ').toUpperCase();
+    sl.style.background = (colors[d.status] || '#94a3b8') + '22';
+    sl.style.color = colors[d.status] || '#94a3b8';
+    document.getElementById('pa-recommendation').textContent = d.recommendation;
+  }} catch(e) {{}}
+}}, 600));
+
+function debounce(fn, delay) {{
+  let t; return function(...args) {{ clearTimeout(t); t = setTimeout(() => fn.apply(this, args), delay); }};
 }}
 
 // ── Outbound Calls ────────────────────────────────────────────────────────────

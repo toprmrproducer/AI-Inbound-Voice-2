@@ -322,6 +322,40 @@ def init_db():
                 ALTER TABLE demo_links ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'auto';
             """)
 
+            # ── Auto-seed Default Agent ──────────────────────────────────────
+            cur.execute("SELECT COUNT(*) FROM agents")
+            if cur.fetchone()[0] == 0:
+                import uuid as _uuid
+                import json
+                try:
+                    with open("configs/default.json", "r") as f:
+                        cfg = json.load(f)
+                except Exception:
+                    cfg = {}
+                
+                cur.execute("""
+                    INSERT INTO agents (
+                        id, name, stt_provider, stt_language, llm_provider, llm_model,
+                        tts_provider, tts_voice, tts_language, first_line, openinggreeting,
+                        agent_instructions, temperature, max_tokens, max_turns, is_active
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+                """, (
+                    str(_uuid.uuid4()),
+                    "Default Agent",
+                    cfg.get("sttprovider", "sarvam"),
+                    cfg.get("sttlanguage", "hi-IN"),
+                    cfg.get("llmprovider", "openai"),
+                    cfg.get("llmmodel", "gpt-4o-mini"),
+                    cfg.get("ttsprovider", "sarvam"),
+                    cfg.get("ttsvoice", "rohan"),
+                    cfg.get("ttslanguage", "hi-IN"),
+                    cfg.get("firstline", ""),
+                    cfg.get("openinggreeting", ""),
+                    cfg.get("agentinstructions", ""),
+                    0.3,
+                    250,
+                    20,
+                ))
             conn.commit()
     logger.info("[DB] Tables and schema initialized successfully")
 
@@ -389,45 +423,81 @@ def set_active_agent(agent_id: str):
             cur.execute("UPDATE agents SET is_active = TRUE WHERE id = %s", (agent_id,))
             conn.commit()
 
-def create_agent(name: str, config: dict, subtitle: str = "AI Assistant",
-                 stt_provider: str = "sarvam", phone_numbers: list = None) -> dict:
-    import uuid as _uuid
+def create_agent(
+    agent_id,
+    name="New Agent",
+    sttprovider="sarvam",
+    sttlanguage="hi-IN",
+    llmprovider="openai",
+    llmmodel="gpt-4o-mini",
+    ttsprovider="sarvam",
+    ttsvoice="rohan",
+    ttslanguage="hi-IN",
+    firstline="",
+    openinggreeting="",
+    agentinstructions="",
+    systemprompt="",
+    temperature=0.3,
+    max_tokens=250,
+    maxturns=20,
+):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            new_id = str(_uuid.uuid4())
             cur.execute("""
-                INSERT INTO agents (id, name, subtitle, config, is_active, stt_provider, phone_numbers)
-                VALUES (%s, %s, %s, %s, FALSE, %s, %s)
+                INSERT INTO agents (
+                    id, name, stt_provider, stt_language, llm_provider, llm_model,
+                    tts_provider, tts_voice, tts_language, first_line, openinggreeting,
+                    agent_instructions, system_prompt, temperature, max_tokens,
+                    max_turns, is_active
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE)
                 RETURNING *
-            """, (new_id, name, subtitle, json.dumps(config), stt_provider, phone_numbers or []))
+            """, (
+                str(agent_id), name, sttprovider, sttlanguage, llmprovider, llmmodel,
+                ttsprovider, ttsvoice, ttslanguage, firstline, openinggreeting,
+                agentinstructions, systemprompt, temperature, max_tokens, maxturns
+            ))
+            row = cur.fetchone()
             conn.commit()
-            return dict(cur.fetchone())
+            return dict(row) if row else None
 
-def update_agent(agent_id: str, name: str = None, config: dict = None,
-                 subtitle: str = None, stt_provider: str = None,
-                 phone_numbers: list = None) -> dict:
+def update_agent(agent_id: str, data: dict):
+    allowed = {
+        "name", "stt_provider", "stt_language", "llm_provider", "llm_model",
+        "tts_provider", "tts_voice", "tts_language", "first_line", "openinggreeting",
+        "agent_instructions", "system_prompt", "temperature", "max_tokens", "max_turns"
+    }
+    # Map from user payload to DB columns if needed, assuming user payload uses the exact matching keys or we rewrite it.
+    # We will map them for safety:
+    col_map = {
+        "sttprovider": "stt_provider",
+        "sttlanguage": "stt_language",
+        "llmprovider": "llm_provider",
+        "llmmodel": "llm_model",
+        "ttsprovider": "tts_provider",
+        "ttsvoice": "tts_voice",
+        "ttslanguage": "tts_language",
+        "firstline": "first_line",
+        "agentinstructions": "agent_instructions",
+        "systemprompt": "system_prompt",
+        "maxturns": "max_turns"
+    }
+    fields = {}
+    for k, v in data.items():
+        db_col = col_map.get(k, k)
+        if db_col in allowed:
+            fields[db_col] = v
+			
+    if not fields:
+        return False
     with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            updates = []
-            values = []
-            if name is not None:
-                updates.append("name = %s"); values.append(name)
-            if subtitle is not None:
-                updates.append("subtitle = %s"); values.append(subtitle)
-            if config is not None:
-                updates.append("config = %s"); values.append(json.dumps(config))
-            if stt_provider is not None:
-                updates.append("stt_provider = %s"); values.append(stt_provider)
-            if phone_numbers is not None:
-                updates.append("phone_numbers = %s"); values.append(phone_numbers)
-            updates.append("updated_at = NOW()")
-            values.append(agent_id)
+        with conn.cursor() as cur:
+            set_clause = ", ".join(f"{k} = %s" for k in fields)
             cur.execute(
-                f"UPDATE agents SET {', '.join(updates)} WHERE id = %s RETURNING *",
-                values
+                f"UPDATE agents SET {set_clause} WHERE id = %s",
+                (*fields.values(), agent_id)
             )
             conn.commit()
-            return dict(cur.fetchone())
+            return cur.rowcount > 0
 
 def delete_agent(agent_id: str):
     with get_conn() as conn:
