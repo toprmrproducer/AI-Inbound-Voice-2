@@ -16,6 +16,97 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         with conn.cursor() as cur:
+
+            # ── MIGRATION: ensure agents table has all required columns ────
+            cur.execute("""
+                DO $$
+                BEGIN
+                    -- Add is_active if missing
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='agents' AND column_name='is_active'
+                    ) THEN
+                        ALTER TABLE agents ADD COLUMN is_active BOOLEAN DEFAULT FALSE;
+                    END IF;
+
+                    -- Add subtitle column
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='agents' AND column_name='subtitle'
+                    ) THEN
+                        ALTER TABLE agents ADD COLUMN subtitle TEXT DEFAULT 'AI Assistant';
+                    END IF;
+
+                    -- Add stt_provider column
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='agents' AND column_name='stt_provider'
+                    ) THEN
+                        ALTER TABLE agents ADD COLUMN stt_provider TEXT DEFAULT 'sarvam';
+                    END IF;
+
+                    -- Add phone_number_mapping column
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='agents' AND column_name='phone_numbers'
+                    ) THEN
+                        ALTER TABLE agents ADD COLUMN phone_numbers TEXT[] DEFAULT '{}';
+                    END IF;
+                END $$;
+            """)
+
+            # ── CREATE TABLE: agents (safe, IF NOT EXISTS) ─────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS agents (
+                    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name        TEXT NOT NULL,
+                    subtitle    TEXT DEFAULT 'AI Assistant',
+                    config      JSONB NOT NULL DEFAULT '{}',
+                    is_active   BOOLEAN DEFAULT FALSE,
+                    stt_provider TEXT DEFAULT 'sarvam',
+                    phone_numbers TEXT[] DEFAULT '{}',
+                    created_at  TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at  TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            # ── demo_links: tie to agent_id ────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS demo_links (
+                    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    slug       TEXT UNIQUE NOT NULL,
+                    agent_id   UUID REFERENCES agents(id) ON DELETE SET NULL,
+                    label      TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            # Add agent_id to demo_links if upgrading
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='demo_links' AND column_name='agent_id'
+                    ) THEN
+                        ALTER TABLE demo_links ADD COLUMN agent_id UUID REFERENCES agents(id) ON DELETE SET NULL;
+                    END IF;
+                END $$;
+            """)
+
+            # ── call_logs: tie to agent_id ─────────────────────────────────
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='call_logs' AND column_name='agent_id'
+                    ) THEN
+                        ALTER TABLE call_logs ADD COLUMN agent_id UUID REFERENCES agents(id) ON DELETE SET NULL;
+                    END IF;
+                END $$;
+            """)
+
             # ── 1. Fix campaign_targets and leads type mismatch ───────────────
             cur.execute("""
                 DO $$
@@ -278,143 +369,84 @@ def delete_sip_trunk(trunk_id: int) -> bool:
 # AGENTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_agents() -> list:
-    try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM agents ORDER BY created_at ASC")
-                return [dict(r) for r in cur.fetchall()]
-    except Exception as e:
-        logger.error(f"[DB] get_agents failed: {e}")
-        return []
-
-
-def get_active_agent() -> dict:
-    try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM agents WHERE is_active = TRUE LIMIT 1")
-                res = cur.fetchone()
-                return dict(res) if res else None
-    except Exception as e:
-        logger.error(f"[DB] get_active_agent failed: {e}")
-        return None
-
-
-def get_agent_by_id(agent_id: str) -> dict:
-    try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM agents WHERE id = %s", (agent_id,))
-                res = cur.fetchone()
-                return dict(res) if res else None
-    except Exception as e:
-        logger.error(f"[DB] get_agent_by_id failed: {e}")
-        return None
-
-
-import uuid as _uuid
-
-def create_agent(agent_id, name,
-                 stt_provider="sarvam", stt_language="hi-IN",
-                 llm_provider="openai", llm_model="gpt-4o-mini",
-                 tts_provider="sarvam", tts_voice="rohan", tts_language="hi-IN",
-                 first_line="", system_prompt="", agent_instructions="",
-                 max_turns=20) -> dict:
+def get_all_agents() -> list:
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            real_id = agent_id if (
-                agent_id and agent_id != "default"
-            ) else str(_uuid.uuid4())
+            cur.execute("SELECT * FROM agents ORDER BY created_at ASC")
+            return [dict(r) for r in cur.fetchall()]
 
+def get_active_agent() -> dict | None:
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM agents WHERE is_active = TRUE LIMIT 1")
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+def set_active_agent(agent_id: str):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE agents SET is_active = FALSE")
+            cur.execute("UPDATE agents SET is_active = TRUE WHERE id = %s", (agent_id,))
+            conn.commit()
+
+def create_agent(name: str, config: dict, subtitle: str = "AI Assistant",
+                 stt_provider: str = "sarvam", phone_numbers: list = None) -> dict:
+    import uuid as _uuid
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            new_id = str(_uuid.uuid4())
             cur.execute("""
-                INSERT INTO agents (
-                    id, name,
-                    stt_provider, stt_language,
-                    llm_provider, llm_model,
-                    tts_provider, tts_voice, tts_language,
-                    first_line, system_prompt, agent_instructions, max_turns
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    stt_provider = EXCLUDED.stt_provider,
-                    stt_language = EXCLUDED.stt_language,
-                    llm_provider = EXCLUDED.llm_provider,
-                    llm_model = EXCLUDED.llm_model,
-                    tts_provider = EXCLUDED.tts_provider,
-                    tts_voice = EXCLUDED.tts_voice,
-                    tts_language = EXCLUDED.tts_language,
-                    first_line = EXCLUDED.first_line,
-                    system_prompt = EXCLUDED.system_prompt,
-                    agent_instructions = EXCLUDED.agent_instructions,
-                    max_turns = EXCLUDED.max_turns
+                INSERT INTO agents (id, name, subtitle, config, is_active, stt_provider, phone_numbers)
+                VALUES (%s, %s, %s, %s, FALSE, %s, %s)
                 RETURNING *
-            """, (
-                real_id, name,
-                stt_provider, stt_language,
-                llm_provider, llm_model,
-                tts_provider, tts_voice, tts_language,
-                first_line, system_prompt, agent_instructions, max_turns
-            ))
+            """, (new_id, name, subtitle, json.dumps(config), stt_provider, phone_numbers or []))
             conn.commit()
             return dict(cur.fetchone())
 
+def update_agent(agent_id: str, name: str = None, config: dict = None,
+                 subtitle: str = None, stt_provider: str = None,
+                 phone_numbers: list = None) -> dict:
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            updates = []
+            values = []
+            if name is not None:
+                updates.append("name = %s"); values.append(name)
+            if subtitle is not None:
+                updates.append("subtitle = %s"); values.append(subtitle)
+            if config is not None:
+                updates.append("config = %s"); values.append(json.dumps(config))
+            if stt_provider is not None:
+                updates.append("stt_provider = %s"); values.append(stt_provider)
+            if phone_numbers is not None:
+                updates.append("phone_numbers = %s"); values.append(phone_numbers)
+            updates.append("updated_at = NOW()")
+            values.append(agent_id)
+            cur.execute(
+                f"UPDATE agents SET {', '.join(updates)} WHERE id = %s RETURNING *",
+                values
+            )
+            conn.commit()
+            return dict(cur.fetchone())
 
-def update_agent(agent_id, data: dict) -> bool:
-    allowed_fields = [
-        "name", "stt_provider", "stt_language",
-        "llm_provider", "llm_model",
-        "tts_provider", "tts_voice", "tts_language",
-        "first_line", "system_prompt", "agent_instructions",
-        "max_turns"
-    ]
-    updates = []
-    values = []
-    for k, v in data.items():
-        if k in allowed_fields:
-            updates.append(f"{k} = %s")
-            values.append(v)
-    if not updates:
-        return False
-    values.append(agent_id)
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"UPDATE agents SET {', '.join(updates)} WHERE id = %s",
-                    tuple(values)
-                )
-                conn.commit()
-                return True
-    except Exception as e:
-        logger.error(f"[DB] update_agent failed: {e}")
-        return False
+def delete_agent(agent_id: str):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM agents WHERE id = %s", (agent_id,))
+            conn.commit()
 
-
-def delete_agent(agent_id: str) -> bool:
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM agents WHERE id = %s", (agent_id,))
-                conn.commit()
-                return True
-    except Exception as e:
-        logger.error(f"[DB] delete_agent failed: {e}")
-        return False
-
-
-def activate_agent(agent_id: str) -> bool:
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE agents SET is_active = FALSE")
-                cur.execute("UPDATE agents SET is_active = TRUE WHERE id = %s", (agent_id,))
-                conn.commit()
-                return True
-    except Exception as e:
-        logger.error(f"[DB] activate_agent failed: {e}")
-        return False
+def get_agent_for_phone(phone: str) -> dict | None:
+    """Find agent configured for this phone number, else return active agent."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM agents WHERE %s = ANY(phone_numbers) LIMIT 1",
+                (phone,)
+            )
+            row = cur.fetchone()
+            if row:
+                return dict(row)
+    return get_active_agent()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -800,6 +832,28 @@ def fetch_call_logs(limit: int = 50) -> list:
     except Exception as e:
         logger.error(f"[DB] fetch_call_logs failed: {e}")
         return []
+
+def get_recent_call_logs(limit: int = 10) -> list:
+    return fetch_call_logs(limit)
+
+def get_dashboard_stats() -> dict:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM call_logs")
+                total_calls = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM campaigns WHERE completed_at IS NULL")
+                active_campaigns = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM agents")
+                total_agents = cur.fetchone()[0]
+                return {
+                    "total_calls": total_calls,
+                    "active_campaigns": active_campaigns,
+                    "total_agents": total_agents
+                }
+    except Exception as e:
+        logger.error(f"[DB] get_dashboard_stats failed: {e}")
+        return {"total_calls": 0, "active_campaigns": 0, "total_agents": 0}
 
 
 def fetch_bookings() -> list:

@@ -47,6 +47,9 @@ livekit-blingfire==1.1.0
 livekit-plugins-openai==1.4.2
 livekit-plugins-sarvam==1.4.2
 livekit-plugins-silero==1.4.2
+livekit-plugins-deepgram
+livekit-plugins-assemblyai
+livekit-plugins-google
 livekit-protocol==1.1.2
 markdown-it-py==4.0.0
 mdurl==0.1.2

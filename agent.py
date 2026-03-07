@@ -65,6 +65,8 @@ from livekit.agents import (
     cli,
     llm,
 )
+
+_speaking_state = {"is_speaking": False}
 try:
     from livekit.agents import noise_cancellation as _nc
 except ImportError:
@@ -164,13 +166,17 @@ def get_live_config(phone_number: str = None):
         import db
         active_agent = db.get_active_agent()
         if active_agent:
-            # Map DB columns to config keys
-            if active_agent.get("agent_instructions"): config["agent_instructions"] = active_agent["agent_instructions"]
-            if active_agent.get("first_line"): config["first_line"] = active_agent["first_line"]
-            if active_agent.get("llm_model"): config["llm_model"] = active_agent["llm_model"]
-            if active_agent.get("tts_voice"): config["tts_voice"] = active_agent["tts_voice"]
-            if active_agent.get("tts_language"): config["tts_language"] = active_agent["tts_language"]
-            if active_agent.get("stt_language"): config["stt_language"] = active_agent["stt_language"]
+            # Check for JSONB config block
+            if "config" in active_agent and isinstance(active_agent["config"], dict):
+                config.update(active_agent["config"])
+                
+            config["stt_provider"] = active_agent.get("stt_provider", "sarvam")
+            config["agent_instructions"] = active_agent.get("agent_instructions", config.get("agent_instructions"))
+            config["first_line"] = active_agent.get("first_line", config.get("first_line"))
+            config["llm_model"] = active_agent.get("llm_model", "gpt-4o")
+            config["tts_voice"] = active_agent.get("tts_voice", config.get("tts_voice"))
+            config["tts_language"] = active_agent.get("tts_language", config.get("tts_language"))
+            config["stt_language"] = active_agent.get("stt_language", config.get("stt_language"))
     except Exception as e:
         logging.getLogger("agent").error(f"Failed to load active agent from DB: {e}")
 
@@ -522,11 +528,23 @@ CRITICAL RESPONSE FORMAT FOR VOICE:
 # AUTO-LANGUAGE AGENT (for demo + future inbound use)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def build_language_hint(lang_code: str, base_instructions: str) -> str:
+    """Soft language hint — never locks, never forbids any language."""
+    cfg = LANGUAGE_CONFIG[lang_code]
+    lang_name = cfg["name"]
+    return (
+        base_instructions
+        + f"\n\n[LANGUAGE HINT] The caller appears to be speaking {lang_name}. "
+        f"Respond primarily in {lang_name}. "
+        f"You may use Hindi and English freely at any time. "
+        f"NEVER tell the caller you cannot speak a language."
+    )
+
 class AutoLanguageAgent(Agent):
     """
     Wraps OutboundAssistant logic for demo sessions.
     Listens for Saaras v3 language detection on first user utterance,
-    then dynamically switches TTS speaker + system prompt to match.
+    then dynamically soft-hints the language to match.
     """
 
     def __init__(self, base_instructions: str = "", first_line: str = ""):
@@ -539,39 +557,16 @@ class AutoLanguageAgent(Agent):
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Fires after every user utterance. We detect language here."""
-        if not self.language_locked:
-            detected = getattr(new_message, "language", None)
-            if not detected:
-                try:
-                    detected = new_message.content[0].language
-                except Exception:
-                    detected = None
+        detected = getattr(new_message, "language", None)
+        if not detected:
+            try:
+                detected = new_message.content[0].language
+            except Exception:
+                detected = None
 
-            # Only accept confident detections (not "unknown")
-            if detected and detected not in ("unknown", "", None) and detected in LANGUAGE_CONFIG:
-                lang_name = LANGUAGE_CONFIG[detected]["name"]
-                
-                # Require same language detected twice in a row before locking
-                if not hasattr(self, '_candidate_lang'):
-                    self._candidate_lang = detected
-                    self._candidate_count = 1
-                elif self._candidate_lang == detected:
-                    self._candidate_count += 1
-                else:
-                    self._candidate_lang = detected
-                    self._candidate_count = 1
-
-                if self._candidate_count >= 2:
-                    self.detected_language = detected
-                    self.language_locked = True
-                    logger.info(f"[LANG] Locked to {detected} ({lang_name}) after 2 confirmations")
-                    # Soft prompt update — never forbids English
-                    self.instructions = (
-                        self._base_instructions
-                        + f"\n\nThe caller is speaking {lang_name}. "
-                        f"Reply in {lang_name}. You may also use English naturally. "
-                        f"Never say you cannot speak English."
-                    )
+        if detected and detected not in ("unknown", "", None) and detected in LANGUAGE_CONFIG:
+            self.detected_language = detected
+            self.instructions = build_language_hint(detected, self._base_instructions)
 
         await super().on_user_turn_completed(turn_ctx, new_message)
 
@@ -628,17 +623,27 @@ async def run_demo_session(ctx: JobContext):
             api_key=os.environ.get("SARVAM_API_KEY") or live_config.get("sarvam_api_key", ""),
         )
 
-    session = AgentSession(
-        stt=sarvam.STT(
+    def build_stt(prov: str, cfg: dict):
+        if prov == "deepgram" and getattr(deepgram_plugin, "STT", None):
+            return deepgram_plugin.STT(language="en")
+        elif prov == "openai":
+            return openai.STT()
+        return sarvam.STT(
             model="saaras:v3", 
             language="unknown", 
             mode="transcribe",
             high_vad_sensitivity=True,
             sample_rate=16000,
             flush_signal=True,
-            api_key=os.environ.get("SARVAM_API_KEY") or live_config.get("sarvam_api_key", ""),
+            api_key=os.environ.get("SARVAM_API_KEY") or cfg.get("sarvam_api_key", ""),
+        )
+
+    session = AgentSession(
+        stt=build_stt(live_config.get("stt_provider", "sarvam"), live_config),
+        llm=openai.LLM(
+            model=llm_model if llm_model else "gpt-4o",
+            temperature=0.75,
         ),
-        llm=openai.LLM(model=llm_model, temperature=0.75),
         tts=demo_tts,
         vad=vad,
         turn_detection="stt",
@@ -881,16 +886,24 @@ async def entrypoint(ctx: JobContext):
             temperature=0.75,
         )
     else:
-        active_llm = openai.LLM(model=llm_model, temperature=0.75)
+        active_llm = openai.LLM(
+            model=llm_model if llm_model else "gpt-4o", 
+            temperature=0.75,
+        )
 
     # ── Build STT (#9/#20) ────────────────────────────────────────────────
-    # Remove ALL deepgram conditions — always use Saaras v3 for multilingual
-    active_stt = sarvam.STT(
-        language="unknown",   # Auto-detects Hindi, Telugu, English, Tamil, Bengali, etc.
-        model="saaras:v3",
-        mode="transcribe",
-        flush_signal=True,
-    )
+    stt_provider = live_config.get("stt_provider", "sarvam")
+    if stt_provider == "deepgram" and getattr(deepgram_plugin, "STT", None):
+        active_stt = deepgram_plugin.STT(language="en")
+    elif stt_provider == "openai":
+        active_stt = openai.STT()
+    else:
+        active_stt = sarvam.STT(
+            language="unknown",   # Auto-detects Hindi, Telugu, English, Tamil, Bengali, etc.
+            model="saaras:v3",
+            mode="transcribe",
+            flush_signal=True,
+        )
 
     # ── Build TTS (#10) ───────────────────────────────────────────────────
     active_tts = sarvam.TTS(
@@ -1040,26 +1053,23 @@ async def entrypoint(ctx: JobContext):
 
     @session.on("agent_speech_started")
     def _agent_speech_started(ev):
-        global agent_is_speaking
         nonlocal last_agent_speak_time
-        agent_is_speaking = True
+        _speaking_state["is_speaking"] = True
         last_agent_speak_time = time.time()
         logger.debug("[STATE] Agent speaking: True")
 
     @session.on("agent_speech_stopped")
     def _agent_speech_stopped(ev):
-        global agent_is_speaking
-        agent_is_speaking = False
+        _speaking_state["is_speaking"] = False
         logger.debug("[STATE] Agent speaking: False (stopped)")
 
     # Watchdog — force-resets stuck flag every 8 seconds
     async def _speaking_watchdog():
-        global agent_is_speaking
         while True:
             await asyncio.sleep(8)
-            if agent_is_speaking:
-                agent_is_speaking = False
-                logger.warning("WATCHDOG: agent_is_speaking force-reset")
+            if _speaking_state["is_speaking"]:
+                _speaking_state["is_speaking"] = False
+                logger.warning("WATCHDOG: speaking state force-reset")
 
     asyncio.create_task(_speaking_watchdog())
 
@@ -1068,9 +1078,8 @@ async def entrypoint(ctx: JobContext):
 
     @session.on("agent_speech_interrupted")
     def on_interrupted(ev):
-        global agent_is_speaking
         nonlocal interrupt_count
-        agent_is_speaking = False
+        _speaking_state["is_speaking"] = False
         interrupt_count += 1
         logger.info(f"[INTERRUPT] Agent interrupted. Total: {interrupt_count}")
 
@@ -1082,13 +1091,12 @@ async def entrypoint(ctx: JobContext):
 
     @session.on("user_speech_committed")
     def on_user_speech_committed(ev):
-        global agent_is_speaking
         nonlocal turn_count
 
         transcript = ev.user_transcript.strip()
         transcript_lower = transcript.lower().rstrip(".")
 
-        if agent_is_speaking:
+        if _speaking_state["is_speaking"]:
             logger.debug(f"[FILTER-ECHO] Dropped: '{transcript}'")
             return
         if not transcript or len(transcript) < 3:
@@ -1136,8 +1144,7 @@ async def entrypoint(ctx: JobContext):
     def on_participant_disconnected(participant):
         logger.info(f"[HANGUP] Participant disconnected: {participant.identity}")
         # Set flag so transcript filter ignores any final flush
-        global agent_is_speaking
-        agent_is_speaking = False  # Clear any stuck state
+        _speaking_state["is_speaking"] = False  # Clear any stuck state
         watchdog_task.cancel()
         # Trigger graceful shutdown
         asyncio.create_task(unified_shutdown_hook(ctx))
