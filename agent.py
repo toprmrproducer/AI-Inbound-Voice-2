@@ -700,6 +700,14 @@ async def entrypoint(ctx: JobContext):
     await start_session(session, ctx, agent, room_options)
     logger.info('[AGENT] Session live — waiting for caller audio.')
 
+    # Force an opening line once the session is live
+    try:
+        opening_line = config.get("first_line") or config.get("opening_greeting") or "Namaste! How can I help you today?"
+        await agent.say(opening_line)
+        logger.info(f"[AGENT] Sent opening line: {opening_line}")
+    except Exception as e:
+        logger.warning(f"[AGENT] Failed to send opening line: {e}")
+
     try:
         from db import init_db
         init_db()
