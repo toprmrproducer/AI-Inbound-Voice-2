@@ -158,6 +158,26 @@ def fetch_bookings() -> list:
         logger.error(f"Failed to fetch bookings: {e}")
         return []
 
+def fetch_stats() -> dict:
+    sb = get_supabase()
+    if not sb: return {"total_calls": 0, "total_bookings": 0, "avg_duration": 0, "booking_rate": 0}
+    try:
+        res = sb.table("call_logs").select("duration_seconds, was_booked").execute()
+        data = res.data or []
+        total_calls = len(data)
+        total_bookings = sum(1 for d in data if d.get("was_booked"))
+        avg_duration = sum(d.get("duration_seconds", 0) for d in data) / total_calls if total_calls > 0 else 0
+        booking_rate = (total_bookings / total_calls * 100) if total_calls > 0 else 0
+        return {
+            "total_calls": total_calls,
+            "total_bookings": total_bookings,
+            "avg_duration": round(avg_duration, 1),
+            "booking_rate": round(booking_rate, 1)
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch stats: {e}")
+        return {"total_calls": 0, "total_bookings": 0, "avg_duration": 0, "booking_rate": 0}
+
 # ─── Agents table (UI additions) ──────────────────────────────────────────────
 def list_agents() -> list:
     sb = get_supabase()
@@ -233,6 +253,9 @@ def get_outbound_active_agent() -> Optional[dict]:
     except Exception as e:
         logger.error(f"Failed to get active outbound agent: {e}")
         return None
+
+def get_active_agent() -> Optional[dict]:
+    return get_inbound_active_agent() or get_outbound_active_agent()
 
 def set_active_agent(agent_id: str, mode: str = "inbound"):
     sb = get_supabase()
@@ -342,3 +365,83 @@ def get_leads_stats(campaign_id: int) -> dict:
     except Exception as e:
         logger.error(f"[DB] Error fetching leads stats: {e}")
         return {'total': 0, 'pending': 0, 'calling': 0, 'completed': 0, 'failed': 0}
+
+# ─── DNC (Do Not Call) List ────────────────────────────────────────────────────
+def is_in_dnc(phone: str) -> bool:
+    sb = get_supabase()
+    if not sb: return False
+    try:
+        res = sb.table("dnc_list").select("id").eq("phone", phone.strip()).execute()
+        return len(res.data) > 0
+    except Exception as e:
+        logger.error(f"Failed to check DNC: {e}")
+        return False
+
+def add_to_dnc(phone: str, reason: str = "") -> bool:
+    sb = get_supabase()
+    if not sb: return False
+    try:
+        res = sb.table("dnc_list").upsert({"phone": phone.strip(), "reason": reason}).execute()
+        return bool(res.data)
+    except Exception as e:
+        logger.error(f"Failed to add to DNC: {e}")
+        return False
+
+def remove_from_dnc(phone: str) -> bool:
+    sb = get_supabase()
+    if not sb: return False
+    try:
+        res = sb.table("dnc_list").delete().eq("phone", phone.strip()).execute()
+        return bool(res.data)
+    except Exception as e:
+        logger.error(f"Failed to remove from DNC: {e}")
+        return False
+
+def get_dnc_list() -> list[dict]:
+    sb = get_supabase()
+    if not sb: return []
+    try:
+        res = sb.table("dnc_list").select("*").order("created_at", desc=True).execute()
+        return res.data or []
+    except Exception as e:
+        logger.error(f"Failed to fetch DNC list: {e}")
+        return []
+
+# ─── SIP Trunks ────────────────────────────────────────────────────────────────
+def get_sip_trunks() -> list[dict]:
+    sb = get_supabase()
+    if not sb: return []
+    try:
+        res = sb.table("sip_trunks").select("*").order("created_at", desc=True).execute()
+        return res.data or []
+    except Exception as e:
+        logger.error(f"Failed to fetch SIP trunks: {e}")
+        return []
+
+def create_sip_trunk(name, provider, sip_uri, username=None, password=None, caller_id_number=None) -> dict:
+    sb = get_supabase()
+    if not sb: return {}
+    try:
+        data = {
+            "name": name,
+            "provider": provider,
+            "sip_uri": sip_uri,
+            "username": username,
+            "password": password,
+            "caller_id_number": caller_id_number
+        }
+        res = sb.table("sip_trunks").insert(data).execute()
+        return res.data[0] if res.data else {}
+    except Exception as e:
+        logger.error(f"Failed to create SIP trunk: {e}")
+        return {}
+
+def delete_sip_trunk(trunk_id: int) -> bool:
+    sb = get_supabase()
+    if not sb: return False
+    try:
+        res = sb.table("sip_trunks").delete().eq("id", trunk_id).execute()
+        return bool(res.data)
+    except Exception as e:
+        logger.error(f"Failed to delete SIP trunk: {e}")
+        return False
