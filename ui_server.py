@@ -151,9 +151,12 @@ def read_config():
 
 def write_config(data):
     config = read_config()
-    config.update(data)
+    # Filter out null/None values so phantom fields never overwrite stored data
+    filtered = {k: v for k, v in data.items() if v is not None}
+    config.update(filtered)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=4)
+    logger.info(f"[CONFIG] Updated keys: {list(filtered.keys())}")
 
 # ── Part C: Agent Helpers & Active Agent Route ──
 def get_active_agent_name():
@@ -2310,7 +2313,7 @@ async function saveConfig(section) {{
   if (section === 'agent' || section === 'system') {{
     Object.assign(payload, {{
       first_line:                get('first_line'),
-      opening_greeting:          get('opening_greeting'),
+      // opening_greeting is only in the Agent Modal, not on this page
       agent_instructions:        get('agent_instructions'),
       stt_min_endpointing_delay: parseFloat(get('stt_min_endpointing_delay') || '0.6'),
       tts_voice:                 get('tts_voice'),
@@ -2436,16 +2439,16 @@ async function deleteAgent(id) {{
 }}
 function editAgent(agent) {{
   editingAgentId = agent.id;
-  const setVal = (id, val) => {{ const el = document.getElementById(id); if (el) el.value = val ?? ''; }};
-  setVal('am-name', agent.name);
-  setVal('am-tts-lang', agent.ttslanguage || agent.tts_language);
-  setVal('am-voice', agent.ttsvoice || agent.tts_voice);
-  setVal('am-llm', agent.llmmodel || agent.llm_model);
-  setVal('am-first-line', agent.firstline || agent.first_line);
-  setVal('am-opening-greeting', agent.openinggreeting);
-  setVal('am-instructions', agent.agentinstructions || agent.agent_instructions);
-  setVal('am-temperature', agent.temperature ?? 0.3);
-  setVal('am-max-tokens', agent.max_tokens ?? 400);
+  const setVal = (id, val) => {{ const el = document.getElementById(id); if (el) el.value = (val !== undefined && val !== null) ? val : ''; }};
+  setVal('am-name',             agent.name                                    || '');
+  setVal('am-tts-lang',         agent.ttslanguage       || agent.tts_language  || 'hi-IN');
+  setVal('am-voice',            agent.ttsvoice          || agent.tts_voice     || 'kavya');
+  setVal('am-llm',              agent.llmmodel          || agent.llm_model     || 'gpt-4o-mini');
+  setVal('am-first-line',       agent.firstline         || agent.first_line    || '');
+  setVal('am-opening-greeting', agent.openinggreeting   || agent.opening_greeting || '');
+  setVal('am-instructions',     agent.agentinstructions || agent.agent_instructions || '');
+  setVal('am-temperature',      agent.temperature !== undefined ? agent.temperature : 0.3);
+  setVal('am-max-tokens',       agent.max_tokens  !== undefined ? agent.max_tokens  : 400);
   document.getElementById('agent-modal').classList.add('open');
 }}
 function openAgentModal() {{ editingAgentId=null; document.getElementById('agent-modal').classList.add('open'); }}
