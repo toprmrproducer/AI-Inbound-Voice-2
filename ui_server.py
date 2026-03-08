@@ -2309,52 +2309,71 @@ async function saveConfig(section) {{
   const payload = {{}};
   if (section === 'agent' || section === 'system') {{
     Object.assign(payload, {{
-      firstline: get('firstline'),
-      openinggreeting: get('openinggreeting'),
-      agentinstructions: get('agentinstructions') || get('instructions'),
-      sttminendpointingdelay: parseFloat(get('sttminendpointingdelay') || get('stt_min_endpointing_delay')),
-      ttsvoice: get('ttsvoice') || get('ttsVoice') || get('tts_voice'),
-      ttslanguage: get('ttslanguage') || get('tts_language'),
-      sttlanguage: get('ttslanguage') || get('sttModel') || get('tts_language') || 'hi-IN',
+      first_line:                get('first_line'),
+      opening_greeting:          get('opening_greeting'),
+      agent_instructions:        get('agent_instructions'),
+      stt_min_endpointing_delay: parseFloat(get('stt_min_endpointing_delay') || '0.6'),
+      tts_voice:                 get('tts_voice'),
+      tts_language:              get('tts_language'),
+      stt_language:              get('stt_language') || get('tts_language') || 'hi-IN',
     }});
   }} else if (section === 'models') {{
     Object.assign(payload, {{
-      llmmodel: get('llmmodel') || get('llm_model'),
-      temperature: parseFloat(get('temperature') || '0.3'),
-      max_tokens: parseInt(get('max_tokens') || '400'),
+      llm_model:    get('llm_model'),
+      temperature:  parseFloat(get('temperature') || '0.3'),
+      max_tokens:   parseInt(get('max_tokens') || '400'),
     }});
   }} else if (section === 'credentials') {{
     Object.assign(payload, {{
-      livekiturl: get('livekit_url'), siptrunkid: get('sip_trunk_id'),
-      livekitapikey: get('livekit_api_key'), livekitapisecret: get('livekit_api_secret'),
-      openaiapikey: get('openai_api_key'), sarvamapikey: get('sarvam_api_key'),
-      calapikey: get('cal_api_key'), caleventtypeid: get('cal_event_type_id'),
-      telegrambottoken: get('telegram_bot_token'), telegramchatid: get('telegram_chat_id'),
-      supabaseurl: get('supabase_url'), supabasekey: get('supabase_key'),
-      vobizsipdomain: get('vobiz_sip_domain'), vobizusername: get('vobiz_username'),
-      vobizpassword: get('vobiz_password'), vobizoutboundnumber: get('vobiz_outbound_number'),
-      vobiznumberpool: get('vobiz_number_pool'),
+      livekit_url:          get('livekit_url'),
+      sip_trunk_id:         get('sip_trunk_id'),
+      livekit_api_key:      get('livekit_api_key'),
+      livekit_api_secret:   get('livekit_api_secret'),
+      openai_api_key:       get('openai_api_key'),
+      sarvam_api_key:       get('sarvam_api_key'),
+      cal_api_key:          get('cal_api_key'),
+      cal_event_type_id:    get('cal_event_type_id'),
+      telegram_bot_token:   get('telegram_bot_token'),
+      telegram_chat_id:     get('telegram_chat_id'),
+      supabase_url:         get('supabase_url'),
+      supabase_key:         get('supabase_key'),
+      vobiz_sip_domain:     get('vobiz_sip_domain'),
+      vobiz_username:       get('vobiz_username'),
+      vobiz_password:       get('vobiz_password'),
+      vobiz_outbound_number: get('vobiz_outbound_number'),
+      vobiz_number_pool:    get('vobiz_number_pool'),
     }});
   }}
 
-  const res = await fetch('/api/config', {{
-    method: 'POST',
-    headers: {{ 'Content-Type': 'application/json' }},
-    body: JSON.stringify(payload),
-  }});
+  console.log('[SAVE] Saving config section:', section);
+  console.log('[SAVE] Payload:', payload);
 
-  const saved = await res.json();  // server now returns full config
-  const statusEl = document.getElementById(`save-status-${{section}}`);
-
-  if (res.ok) {{
-    // Repopulate fields from server response so UI shows what was actually saved
-    Object.entries(saved).forEach(([key, val]) => {{
-      const el = document.getElementById(key);
-      if (el && val !== null && val !== undefined) el.value = val;
+  try {{
+    const res = await fetch('/api/config', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload),
     }});
-    if (statusEl) {{ statusEl.style.opacity = 1; setTimeout(() => statusEl.style.opacity = 0, 2500); }}
-  }} else {{
-    alert('Failed to save. Check server logs.');
+
+    const saved = await res.json();
+    console.log('[SAVE] Server response:', saved);
+    const statusEl = document.getElementById(`save-status-${{section}}`);
+
+    if (res.ok) {{
+      // Repopulate fields from server response so UI shows what was actually saved
+      Object.entries(saved).forEach(([key, val]) => {{
+        const el = document.getElementById(key);
+        if (el && val !== null && val !== undefined) el.value = val;
+      }});
+      if (statusEl) {{ statusEl.style.opacity = 1; setTimeout(() => statusEl.style.opacity = 0, 2500); }}
+    }} else {{
+      const errMsg = saved.detail || saved.error || 'Unknown error';
+      console.error('[SAVE] Failed:', errMsg);
+      alert('Save failed: ' + errMsg);
+    }}
+  }} catch(e) {{
+    console.error('[SAVE] Request failed:', e);
+    alert('Network error: ' + e.message);
   }}
 }}
 
@@ -2854,24 +2873,30 @@ async function createDemo() {{
   closeDemoModal(); loadDemos();
 }}
 
-// ── Boot ────────────────────────────────────────────────────────────────────
-loadDashboard();
-// Start live calls WebSocket (auto-reconnects)
-initLiveCallsWS();
-
+// ── Sidebar Active Agent Sync ───────────────────────────────────────────────
 async function syncSidebarName() {{
   try {{
     const res = await fetch('/api/active-agent');
     if (!res.ok) return;
     const a = await res.json();
-    const nameEl = document.querySelector('.brand-text');
+    if (a.error) return;
+    const nameEl = document.getElementById('sidebar-brand-name') || document.querySelector('.brand-text');
     const subEl  = document.querySelector('.brand-sub');
     if (a.name && nameEl) nameEl.textContent = a.name;
     if (subEl) subEl.textContent = a.subtitle || 'AI Assistant';
-  }} catch(e) {{}}
+    console.log('[INIT] Active agent:', a.name);
+  }} catch(e) {{ console.warn('[INIT] syncSidebarName failed:', e); }}
 }}
-setInterval(syncSidebarName, 5000);
-syncSidebarName();
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {{
+  console.log('[INIT] Dashboard loading...');
+  loadDashboard();
+  initLiveCallsWS();
+  syncSidebarName();
+  setInterval(syncSidebarName, 5000);
+  console.log('[INIT] Dashboard ready');
+}});
 </script>
 </body>
 </html>"""
