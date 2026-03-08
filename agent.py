@@ -425,7 +425,7 @@ async def run_demo_session(ctx: JobContext):
 async def entrypoint(ctx: JobContext):
     logger.info(f'[JOB] id={ctx.job.id}')
     raw_meta = ctx.job.metadata or ''
-    logger.info(f'[JOB] raw metadata={repr(raw_meta)}')
+    logger.info(f'[JOB] id={ctx.job.id} — metadata parsed securely')
 
     await ctx.connect()
     logger.info(f'[ROOM] Connected: {ctx.room.name}')

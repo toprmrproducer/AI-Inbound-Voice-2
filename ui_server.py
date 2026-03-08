@@ -18,6 +18,17 @@ logger = logging.getLogger("ui-server")
 
 app = FastAPI(title="Med Spa AI Dashboard")
 
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    # Applying SOP Phase 6 Headers, tuned for CDN/LiveKit functionality
+    response.headers["Content-Security-Policy"] = "default-src 'self' wss://*.livekit.cloud https://*.livekit.cloud; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' wss://*.livekit.cloud https://*.livekit.cloud;"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+    response.headers["Referrer-Policy"] = "no-referrer-when-downgrade"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 # ── WebSocket Connection Manager ──────────────────────────────────────────────
 class ConnectionManager:
     def __init__(self):
