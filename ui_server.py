@@ -1223,6 +1223,54 @@ def api_delete_agent(agent_id: str):
     db.delete_agent(agent_id)
     return {"status": "deleted"}
 
+@app.post("/api/agents/{agent_id}/activate-inbound")
+def api_activate_inbound(agent_id: str):
+    import db
+    try:
+        db.set_active_agent(agent_id, mode="inbound")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    target = db.get_inbound_active_agent()
+    if target:
+        # Update config.json so the running worker picks up the new agent
+        cfg = read_config()
+        FIELD_MAP = [
+            ("agent_instructions", "agentinstructions",       "agent_instructions"),
+            ("openinggreeting",    "openinggreeting",          "opening_greeting"),
+            ("first_line",         "firstline",                "first_line"),
+            ("llm_model",          "llmmodel",                 "llm_model"),
+            ("llm_provider",       "llmprovider",              "llm_provider"),
+            ("tts_voice",          "ttsvoice",                 "tts_voice"),
+            ("tts_language",       "ttslanguage",              "tts_language"),
+            ("tts_provider",       "ttsprovider",              "tts_provider"),
+            ("stt_provider",       "sttprovider",              "stt_provider"),
+            ("stt_language",       "sttlanguage",              "stt_language"),
+            ("temperature",        "temperature",              "temperature"),
+            ("max_tokens",         "max_tokens",               "max_tokens"),
+            ("max_turns",          "maxturns",                 "max_turns"),
+        ]
+        written = {}
+        for snake, camel, cfg_key in FIELD_MAP:
+            val = target.get(snake) or target.get(camel)
+            if val is not None and val != "":
+                cfg[cfg_key] = val
+                written[cfg_key] = val
+        write_config(cfg)
+        logger.info(f"[AGENT] Set INBOUND agent: {target.get('name')} ({agent_id}). Fields written: {list(written.keys())}")
+        logger.info(f"[AGENT] first_line='{written.get('first_line','')}' | opening_greeting='{written.get('opening_greeting','')}'")    
+    return {"status": "inbound_activated", "agent": target}
+
+@app.post("/api/agents/{agent_id}/activate-outbound")
+def api_activate_outbound(agent_id: str):
+    import db
+    try:
+        db.set_active_agent(agent_id, mode="outbound")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    target = db.get_outbound_active_agent()
+    logger.info(f"[AGENT] Set OUTBOUND agent: {target.get('name') if target else None} ({agent_id})")
+    return {"status": "outbound_activated", "agent": target}
+
 # ── Main Dashboard HTML ────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -2556,25 +2604,44 @@ async function loadAgents() {{
   const g = document.getElementById('agents-grid'); if (!g) return;
   g.innerHTML = '<div style="color:var(--muted);padding:20px;">Loading...</div>';
   const agents = await fetch('/api/agents').then(r=>r.json()).catch(()=>[]);
-  if (!agents.length) {{ g.innerHTML='<div style="color:var(--muted);padding:20px;">No agents yet.</div>'; return; }}
-  g.innerHTML = agents.map(a=>`
-    <div class="agent-card${{a.active?' active':''}}">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+  if (!agents.length) {{ g.innerHTML='<div style="color:var(--muted);padding:20px;">No agents yet. Click + New Agent to create one.</div>'; return; }}
+  g.innerHTML = agents.map(a=>{{
+    const isInbound  = a.is_inbound_active;
+    const isOutbound = a.is_outbound_active;
+    const badges = [
+      isInbound  ? '<span class="badge" style="background:rgba(74,222,128,.15);color:#4ade80;border:1px solid rgba(74,222,128,.3);">📞 Inbound</span>'  : '',
+      isOutbound ? '<span class="badge" style="background:rgba(96,165,250,.15);color:#60a5fa;border:1px solid rgba(96,165,250,.3);">📤 Outbound</span>' : '',
+    ].filter(Boolean).join(' ');
+    return `
+    <div class="agent-card${{isInbound?' active':''}}">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
         <div style="font-weight:700;">🤖 ${{a.name}}</div>
-        ${{a.active?'<span class="badge badge-green">● Live</span>':''}}
+        <div>${{badges}}</div>
       </div>
       <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">
-        🌐 ${{a.tts_language||'hi-IN'}} · 🎙 ${{a.tts_voice||'rohan'}} · 🧠 ${{a.llm_model||'gpt-4o-mini'}}
+        🌐 ${{a.tts_language||'hi-IN'}} · 🎙 ${{a.tts_voice||'rohan'}} · 🧠 ${{a.llm_model||'gpt-4.1-mini'}}
       </div>
-      <div style="display:flex;gap:8px;">
-        ${{!a.active?`<button class="btn btn-primary btn-sm" onclick="activateAgent('${{a.id}}')">▶ Activate</button>`:''}}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${{!isInbound  ? `<button class="btn btn-primary btn-sm" onclick="activateInboundAgent('${{a.id}}')">📞 Set Inbound</button>` : ''}}
+        ${{!isOutbound ? `<button class="btn btn-ghost btn-sm" style="border:1px solid rgba(96,165,250,.4);color:#60a5fa;" onclick="activateOutboundAgent('${{a.id}}')">📤 Set Outbound</button>` : ''}}
         <button class="btn btn-ghost btn-sm" onclick='editAgent(${{JSON.stringify(a)}})'>✏ Edit</button>
         ${{a.id!=='default'?`<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="deleteAgent('${{a.id}}')">🗑</button>`:''}}
       </div>
-    </div>`).join('');
+    </div>`;
+  }}).join('');
 }}
 
-async function activateAgent(id) {{ await fetch('/api/agents/'+id+'/activate',{{method:'POST'}}); loadAgents(); }}
+async function activateAgent(id) {{ await activateInboundAgent(id); }}
+async function activateInboundAgent(id) {{
+  const res = await fetch('/api/agents/'+id+'/activate-inbound',{{method:'POST'}});
+  if (!res.ok) {{ alert('Failed to set inbound agent'); return; }}
+  loadAgents();
+}}
+async function activateOutboundAgent(id) {{
+  const res = await fetch('/api/agents/'+id+'/activate-outbound',{{method:'POST'}});
+  if (!res.ok) {{ alert('Failed to set outbound agent'); return; }}
+  loadAgents();
+}}
 async function deleteAgent(id) {{
   if (!confirm('Delete this agent?')) return;
   await fetch('/api/agents/'+id,{{method:'DELETE'}}); loadAgents();

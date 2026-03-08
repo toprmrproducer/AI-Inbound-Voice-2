@@ -97,6 +97,13 @@ def init_db():
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='max_turns') THEN
                         ALTER TABLE agents ADD COLUMN max_turns INTEGER DEFAULT 25;
                     END IF;
+                    -- Inbound / Outbound active flags (separate from legacy is_active)
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='is_inbound_active') THEN
+                        ALTER TABLE agents ADD COLUMN is_inbound_active BOOLEAN DEFAULT FALSE;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='is_outbound_active') THEN
+                        ALTER TABLE agents ADD COLUMN is_outbound_active BOOLEAN DEFAULT FALSE;
+                    END IF;
                 END $$;
             """)
 
@@ -463,17 +470,63 @@ def get_all_agents() -> list:
             return [dict(r) for r in cur.fetchall()]
 
 def get_active_agent() -> dict | None:
+    """Legacy fallback: return whichever agent has is_active=TRUE."""
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM agents WHERE is_active = TRUE LIMIT 1")
             row = cur.fetchone()
             return dict(row) if row else None
 
-def set_active_agent(agent_id: str):
+def get_inbound_active_agent() -> dict | None:
+    """Return the agent marked for handling inbound calls."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM agents WHERE is_inbound_active = TRUE LIMIT 1")
+            row = cur.fetchone()
+            if row:
+                return dict(row)
+    # Fallback: use the legacy is_active agent
+    return get_active_agent()
+
+def get_outbound_active_agent() -> dict | None:
+    """Return the agent marked for handling outbound calls."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM agents WHERE is_outbound_active = TRUE LIMIT 1")
+            row = cur.fetchone()
+            if row:
+                return dict(row)
+    # Fallback: use inbound agent, then legacy active
+    return get_inbound_active_agent()
+
+def get_config_for_agent(agent_id: str) -> dict | None:
+    """Return a specific agent row by id — used for campaign-assigned agents."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM agents WHERE id = %s LIMIT 1", (agent_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+def set_active_agent(agent_id: str, mode: str = "inbound"):
+    """
+    mode='inbound'  → set is_inbound_active + legacy is_active
+    mode='outbound' → set is_outbound_active only
+    mode='legacy'   → set legacy is_active only (backward compat)
+    """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE agents SET is_active = FALSE")
-            cur.execute("UPDATE agents SET is_active = TRUE WHERE id = %s", (agent_id,))
+            if mode == "inbound":
+                cur.execute("UPDATE agents SET is_inbound_active = FALSE")
+                cur.execute("UPDATE agents SET is_inbound_active = TRUE WHERE id = %s", (agent_id,))
+                # Also set legacy is_active so older code paths still work
+                cur.execute("UPDATE agents SET is_active = FALSE")
+                cur.execute("UPDATE agents SET is_active = TRUE WHERE id = %s", (agent_id,))
+            elif mode == "outbound":
+                cur.execute("UPDATE agents SET is_outbound_active = FALSE")
+                cur.execute("UPDATE agents SET is_outbound_active = TRUE WHERE id = %s", (agent_id,))
+            else:  # legacy
+                cur.execute("UPDATE agents SET is_active = FALSE")
+                cur.execute("UPDATE agents SET is_active = TRUE WHERE id = %s", (agent_id,))
             conn.commit()
 
 def create_agent(

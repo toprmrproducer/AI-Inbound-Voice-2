@@ -585,7 +585,19 @@ async def entrypoint(ctx: JobContext):
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning(f'[METADATA] Parse error: {e} — treating as inbound')
 
+    # Inbound = no phone_number in metadata (SIP trunk connected, no dispatch metadata)
+    # Outbound = phone_number was provided (we dispatched this job with metadata)
+    campaign_agent_id = None
+    if raw_meta.strip():
+        try:
+            meta = json.loads(raw_meta)
+            campaign_agent_id = meta.get('agent_id')  # set by bulk campaigns
+        except Exception:
+            pass
+
+    mode        = 'outbound' if phone_number else 'inbound'
     caller_phone = phone_number or 'unknown'
+    logger.info(f'[CALL] mode={mode} | phone={caller_phone} | campaign_agent={campaign_agent_id}')
 
     if is_rate_limited(caller_phone):
         logger.warning(f'[RATE-LIMIT] Blocked {caller_phone}')
@@ -624,8 +636,8 @@ async def entrypoint(ctx: JobContext):
             logger.info(f'[CALLER-ID] {caller_name}')
             break
 
-    # ── Load config ───────────────────────────────────────────────────────────
-    config = get_live_config(phone_number)
+    # ── Load config based on mode (inbound/outbound) and optional campaign agent ──
+    config = get_live_config(phone_number, mode=mode, agent_id=campaign_agent_id)
 
     # Inject caller history if exists
     if caller_phone != 'unknown':
