@@ -114,7 +114,7 @@ def read_config():
         "first_line": get_val("first_line", "FIRST_LINE", "Namaste! Welcome to Daisy's Med Spa. Main aapki kaise madad kar sakti hoon? I can answer questions about our treatments or help you book an appointment."),
         "agent_instructions": get_val("agent_instructions", "AGENT_INSTRUCTIONS", ""),
         "stt_min_endpointing_delay": float(get_val("stt_min_endpointing_delay", "STT_MIN_ENDPOINTING_DELAY", 0.6)),
-        "llm_model": get_val("llm_model", "LLM_MODEL", "gpt-4o-mini"),
+        "llm_model": get_val("llm_model", "LLM_MODEL", "gpt-4.1-mini"),
         "tts_voice": get_val("tts_voice", "TTS_VOICE", "kavya"),
         "tts_language": get_val("tts_language", "TTS_LANGUAGE", "hi-IN"),
         "stt_language": get_val("stt_language", "STT_LANGUAGE", "hi-IN"),
@@ -1046,7 +1046,7 @@ async def api_agents_create(request: Request):
             openinggreeting=data.get("openinggreeting", ""),
             agentinstructions=data.get("agentinstructions", data.get("systemprompt", "")),
             temperature=float(data.get("temperature", 0.3)),
-            max_tokens=int(data.get("max_tokens", 250)),
+            max_tokens=int(data.get("max_tokens", 400)),
             maxturns=int(data.get("maxturns", 20)),
         )
         return agent
@@ -2230,7 +2230,7 @@ async function saveConfig(section) {{
     Object.assign(payload, {{
       llmmodel: get('llmmodel') || get('llm_model'),
       temperature: parseFloat(get('temperature') || '0.3'),
-      max_tokens: parseInt(get('max_tokens') || '250'),
+      max_tokens: parseInt(get('max_tokens') || '400'),
     }});
   }} else if (section === 'credentials') {{
     Object.assign(payload, {{
@@ -2335,7 +2335,7 @@ function editAgent(agent) {{
   setVal('am-opening-greeting', agent.openinggreeting);
   setVal('am-instructions', agent.agentinstructions || agent.agent_instructions);
   setVal('am-temperature', agent.temperature ?? 0.3);
-  setVal('am-max-tokens', agent.max_tokens ?? 250);
+  setVal('am-max-tokens', agent.max_tokens ?? 400);
   document.getElementById('agent-modal').classList.add('open');
 }}
 function openAgentModal() {{ editingAgentId=null; document.getElementById('agent-modal').classList.add('open'); }}
@@ -2352,7 +2352,7 @@ async function saveAgent() {{
     openinggreeting: g('am-opening-greeting'),
     agentinstructions: g('am-instructions'),
     temperature: parseFloat(g('am-temperature') || '0.3'),
-    max_tokens: parseInt(g('am-max-tokens') || '250'),
+    max_tokens: parseInt(g('am-max-tokens') || '400'),
   }};
   const url = editingAgentId ? `/api/agents/${{editingAgentId}}` : '/api/agents';
   const method = editingAgentId ? 'PUT' : 'POST';
