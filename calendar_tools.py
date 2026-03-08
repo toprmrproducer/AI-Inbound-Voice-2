@@ -150,3 +150,4 @@ def cancel_booking(booking_id: str, reason: str = "Cancelled by caller") -> dict
     except Exception as e:
         logger.error(f"[CAL] cancel_booking error: {e}")
         return {"success": False, "message": str(e)}
+
