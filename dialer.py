@@ -1,206 +1,153 @@
-"""
-dialer.py — Campaign Dialer Engine
------------------------------------
-Runs as an asyncio task launched by ui_server.py when a campaign is started.
-Fetches pending leads, creates LiveKit SIP participants, throttles per campaign
-`calls_per_minute`, and updates lead status in the DB.
-
-Usage (called from ui_server.py):
-    asyncio.create_task(run_dialer_for_campaign(campaign_id, broadcast_fn))
-"""
-
-import os
-import json
-import asyncio
-import logging
+# dialer.py — Campaign dialer engine
+import os, json, asyncio, logging, random
 from datetime import datetime
 
-logger = logging.getLogger("dialer")
-
+logger = logging.getLogger('dialer')
 
 async def run_dialer_for_campaign(campaign_id: int, broadcast_fn=None):
     """
-    Main dialer loop for a campaign.
-
-    Args:
-        campaign_id: DB id of the campaign row.
-        broadcast_fn: async callable(dict) to notify WebSocket clients.
-                      Can be None — the dialer works without it.
+    Core dialer loop for a campaign.
+    Reads leads from DB, calls each one, updates status in real-time.
+    broadcast_fn is the WebSocket broadcast coroutine from ui_server.
     """
     import db
 
-    logger.info(f"[DIALER] Starting dialer for campaign {campaign_id}")
-
-    # ── Load campaign config ─────────────────────────────────────────────────
     campaign = db.get_campaign_full(campaign_id)
     if not campaign:
-        logger.error(f"[DIALER] Campaign {campaign_id} not found — aborting")
+        logger.error(f'[DIALER] Campaign {campaign_id} not found')
         return
 
-    if campaign.get("status") != "active":
-        logger.warning(f"[DIALER] Campaign {campaign_id} is not active (status={campaign.get('status')}) — aborting")
-        return
+    max_concurrent = int(campaign.get('max_concurrent_calls', 3))
+    calls_per_min  = int(campaign.get('calls_per_minute', 5))
+    retry_failed   = bool(campaign.get('retry_failed', True))
+    max_retries    = int(campaign.get('max_retries', 2))
+    sip_trunk_id   = campaign.get('sip_trunk_id') or os.environ.get('SIP_TRUNK_ID', '')
 
-    sip_trunk_id = campaign.get("sip_trunk_id")
-    if not sip_trunk_id:
-        logger.error(f"[DIALER] Campaign {campaign_id} has no SIP trunk configured")
-        await _finish_campaign(campaign_id, "completed")
-        return
+    # Number pool / masking
+    base_number = os.environ.get('VOBIZ_OUTBOUND_NUMBER', '').strip()
+    pool_str    = os.environ.get('VOBIZ_NUMBER_POOL', '').strip()
+    pool        = [n.strip() for n in pool_str.split(',') if n.strip()] if pool_str else []
 
-    # Resolve the LiveKit SIP trunk ID from env or config
-    livekit_sip_trunk_id = (
-        os.environ.get("OUTBOUND_TRUNK_ID")
-        or os.environ.get("SIP_TRUNK_ID")
-        or ""
-    )
-    if not livekit_sip_trunk_id:
-        logger.error("[DIALER] OUTBOUND_TRUNK_ID / SIP_TRUNK_ID not set — aborting")
-        return
+    # LiveKit credentials
+    lk_url    = os.environ.get('LIVEKIT_URL', '')
+    lk_key    = os.environ.get('LIVEKIT_API_KEY', '')
+    lk_secret = os.environ.get('LIVEKIT_API_SECRET', '')
 
-    agent_id = campaign.get("agent_id")
-    calls_per_minute = int(campaign.get("calls_per_minute") or 5)
-    retry_failed = bool(campaign.get("retry_failed", True))
-    max_retries = int(campaign.get("max_retries") or 2)
+    # Agent ID for campaign
+    agent_id = campaign.get('agent_id')
+    agent_cfg = {}
+    if agent_id:
+        agents = db.get_all_agents()
+        match  = [a for a in agents if str(a.get('id')) == str(agent_id)]
+        if match:
+            agent_cfg = match[0]
 
-    # Interval between calls (seconds)
-    call_interval = 60.0 / max(calls_per_minute, 1)
+    async def dispatch_call(lead: dict) -> bool:
+        phone = lead.get('phone', '').strip()
+        name  = lead.get('name', '') or ''
 
-    # ── Import LiveKit API ────────────────────────────────────────────────────
-    try:
-        from livekit import api as lk_api
-        lk = lk_api.LiveKitAPI(
-            url=os.environ["LIVEKIT_URL"],
-            api_key=os.environ["LIVEKIT_API_KEY"],
-            api_secret=os.environ["LIVEKIT_API_SECRET"],
-        )
-    except Exception as e:
-        logger.error(f"[DIALER] Failed to create LiveKit client: {e}")
-        return
+        if not phone:
+            logger.warning(f'[DIALER] Lead {lead.get("id")} has no phone — skipping')
+            return False
 
-    dispatched = 0
-    retried = False
+        # Pick mask number
+        from_number = random.choice(pool) if pool else base_number
 
-    try:
-        while True:
-            # ── Check if campaign is still active ────────────────────────────
-            fresh = db.get_campaign_full(campaign_id)
-            if not fresh or fresh.get("status") != "active":
-                logger.info(f"[DIALER] Campaign {campaign_id} status={fresh.get('status') if fresh else 'gone'} — stopping")
-                break
+        try:
+            from livekit import api as lk_api
+            room = f'bulk-{phone.replace("+","")}-{random.randint(1000,9999)}'
+            metadata = json.dumps({
+                'phone_number': phone,
+                'sip_trunk_id': sip_trunk_id,
+                'name': name,
+                'campaign_id': campaign_id,
+                'lead_id': lead['id'],
+                **(({'from_number': from_number}) if from_number else {}),
+            })
 
-            # ── Fetch next pending lead ───────────────────────────────────────
-            leads = db.get_pending_leads(campaign_id, limit=1)
-
-            if not leads:
-                # If retry_failed is on and we haven't retried yet
-                if retry_failed and not retried:
-                    requeued = db.requeue_failed_leads(campaign_id)
-                    if requeued > 0:
-                        logger.info(f"[DIALER] Requeued {requeued} failed leads for retry")
-                        retried = True
-                        continue
-
-                logger.info(f"[DIALER] No more pending leads for campaign {campaign_id} — completing")
-                await _finish_campaign(campaign_id, "completed")
-                break
-
-            lead = leads[0]
-            lead_id = str(lead["id"])
-            phone = lead["phone"]
-            name = lead.get("name") or "Unknown"
-
-            # ── DNC check ────────────────────────────────────────────────────
-            if db.is_in_dnc(phone):
-                logger.warning(f"[DIALER] Skipping {phone} — on DNC list")
-                db.update_lead_status(lead_id, "failed")
-                continue
-
-            # ── Mark lead as calling ─────────────────────────────────────────
-            db.update_lead_status(lead_id, "calling")
-
-            # ── Build metadata for agent.py ──────────────────────────────────
-            metadata = {
-                "phone_number": phone,
-                "name": name,
-                "campaign_id": campaign_id,
-                "lead_id": lead_id,
-            }
-            if agent_id:
-                metadata["agent_id"] = str(agent_id)
-
-            room_name = f"campaign-{campaign_id}-lead-{lead_id[:8]}"
-
-            # ── Dispatch LiveKit SIP participant ─────────────────────────────
-            try:
-                await lk.room.create_room(
-                    lk_api.CreateRoomRequest(name=room_name)
-                )
+            async with lk_api.LiveKitAPI(lk_url, lk_key, lk_secret) as lk:
                 await lk.agent_dispatch.create_dispatch(
                     lk_api.CreateAgentDispatchRequest(
-                        agent_name="outbound-caller",
-                        room=room_name,
-                        metadata=json.dumps(metadata),
+                        agent_name='outbound-caller',
+                        room=room,
+                        metadata=metadata,
                     )
                 )
-                logger.info(f"[DIALER] Dispatched call to {phone} | room={room_name} | lead={lead_id}")
-                dispatched += 1
 
-                # Broadcast to WebSocket clients
-                if broadcast_fn:
-                    try:
-                        await broadcast_fn({
-                            "type": "call_status",
-                            "lead_id": lead_id,
-                            "campaign_id": campaign_id,
-                            "phone": phone,
-                            "name": name,
-                            "room": room_name,
-                            "status": "calling",
-                            "timestamp": datetime.utcnow().isoformat(),
-                        })
-                    except Exception as ws_err:
-                        logger.warning(f"[DIALER] WS broadcast failed: {ws_err}")
+            db.update_lead_status(lead['id'], 'called')
+            logger.info(f'[DIALER] Dispatched call to {phone} (room={room})')
 
-            except Exception as e:
-                logger.error(f"[DIALER] Failed to dispatch call for {phone}: {e}")
-                db.update_lead_status(lead_id, "failed")
+            if broadcast_fn:
+                await broadcast_fn({
+                    'type': 'campaign_progress',
+                    'campaign_id': campaign_id,
+                    'lead_id': lead['id'],
+                    'phone': phone,
+                    'status': 'called',
+                    'timestamp': datetime.utcnow().isoformat(),
+                })
+            return True
 
-                if broadcast_fn:
-                    try:
-                        await broadcast_fn({
-                            "type": "call_status",
-                            "lead_id": lead_id,
-                            "campaign_id": campaign_id,
-                            "phone": phone,
-                            "status": "failed",
-                            "timestamp": datetime.utcnow().isoformat(),
-                        })
-                    except Exception:
-                        pass
+        except Exception as e:
+            logger.error(f'[DIALER] Failed to dispatch {phone}: {e}')
+            db.update_lead_status(lead['id'], 'failed')
+            if broadcast_fn:
+                try:
+                    await broadcast_fn({
+                        'type': 'campaign_progress',
+                        'campaign_id': campaign_id,
+                        'lead_id': lead['id'],
+                        'phone': phone,
+                        'status': 'failed',
+                        'error': str(e),
+                        'timestamp': datetime.utcnow().isoformat(),
+                    })
+                except Exception:
+                    pass
+            return False
 
-            # ── Throttle ─────────────────────────────────────────────────────
-            await asyncio.sleep(call_interval)
+    # Main dispatch loop
+    leads = db.get_leads(campaign_id, status='pending')
+    if retry_failed:
+        failed = db.get_leads(campaign_id, status='failed')
+        leads += [l for l in failed if int(l.get('retry_count', 0)) < max_retries]
 
-    except asyncio.CancelledError:
-        logger.info(f"[DIALER] Campaign {campaign_id} dialer task cancelled")
-    except Exception as e:
-        logger.error(f"[DIALER] Unexpected error in dialer loop: {e}", exc_info=True)
-    finally:
+    total   = len(leads)
+    done    = 0
+    delay_s = 60.0 / max(calls_per_min, 1)
+
+    logger.info(f'[DIALER] Campaign {campaign_id}: {total} leads, {calls_per_min}/min, max_concurrent={max_concurrent}')
+
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def dispatch_with_sem(lead):
+        nonlocal done
+        async with semaphore:
+            # Re-check campaign is still active before each call
+            fresh = db.get_campaign_full(campaign_id)
+            if fresh and fresh.get('status') not in ('active', 'running'):
+                logger.info(f'[DIALER] Campaign {campaign_id} paused/stopped — halting')
+                return
+            await dispatch_call(lead)
+            done += 1
+            logger.info(f'[DIALER] Campaign {campaign_id}: {done}/{total} leads dispatched')
+            await asyncio.sleep(delay_s)
+
+    tasks = [asyncio.create_task(dispatch_with_sem(lead)) for lead in leads]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    db.update_campaign_status(campaign_id, 'completed')
+    logger.info(f'[DIALER] Campaign {campaign_id} completed. {done}/{total} calls dispatched.')
+
+    if broadcast_fn:
         try:
-            await lk.aclose()
+            await broadcast_fn({
+                'type': 'campaign_complete',
+                'campaign_id': campaign_id,
+                'total': total,
+                'dispatched': done,
+                'timestamp': datetime.utcnow().isoformat(),
+            })
         except Exception:
             pass
-        logger.info(
-            f"[DIALER] Campaign {campaign_id} dialer stopped. "
-            f"Dispatched {dispatched} calls."
-        )
-
-
-async def _finish_campaign(campaign_id: int, status: str):
-    """Mark campaign complete in the DB."""
-    try:
-        import db
-        db.update_campaign_status(campaign_id, status)
-        logger.info(f"[DIALER] Campaign {campaign_id} marked as {status}")
-    except Exception as e:
-        logger.error(f"[DIALER] Failed to mark campaign {campaign_id} as {status}: {e}")

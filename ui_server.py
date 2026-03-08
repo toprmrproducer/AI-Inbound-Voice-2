@@ -200,6 +200,21 @@ def api_active_agent():
         logger.error(f"[API] /api/active-agent failed: {e}")
         return {"error": str(e)}
 
+@app.put("/api/active-agent")
+async def api_put_active_agent(request: Request):
+    """Update the currently active agent's settings directly in the DB."""
+    import db
+    try:
+        data = await request.json()
+        active = db.get_active_agent()
+        if not active:
+            raise HTTPException(status_code=404, detail="No active agent.")
+        db.update_agent(active["id"], data)
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"[API] PUT /api/active-agent error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ── API Endpoints ──────────────────────────────────────────────────────────────
 
 @app.get("/api/config")
@@ -516,6 +531,33 @@ async def api_delete_sip_trunk(trunk_id: int):
     import db
     ok = db.delete_sip_trunk(trunk_id)
     return {"status": "deleted" if ok else "error"}
+
+# ── DNC List endpoints ──────────────────────────────────────────────
+
+@app.get("/api/dnc")
+async def api_get_dnc():
+    import db
+    try:
+        return db.get_dnc_list()
+    except Exception as e:
+        logger.error(f"[API] /api/dnc GET error: {e}")
+        return []
+
+@app.post("/api/dnc")
+async def api_add_dnc(request: Request):
+    import db
+    data = await request.json()
+    phone = data.get("phone")
+    if not phone:
+        raise HTTPException(status_code=400, detail="Phone required")
+    db.add_to_dnc(phone, data.get("reason", "Manual"))
+    return {"ok": True}
+
+@app.delete("/api/dnc/{phone}")
+async def api_remove_dnc(phone: str):
+    import db
+    db.remove_from_dnc(phone)
+    return {"ok": True}
 
 # ── WebSocket: Live Call Status ───────────────────────────────────────────────
 
@@ -1422,13 +1464,16 @@ async def get_dashboard():
 
 <!-- ── Agent Modal ── -->
 <div class="modal-overlay" id="agent-modal" onclick="if(event.target===this)closeAgentModal()">
-  <div class="modal-box" style="position:relative;max-width:640px;width:95%;max-height:90vh;overflow-y:auto;">
+  <div class="modal-box" style="position:relative;max-width:660px;width:95%;max-height:92vh;overflow-y:auto;">
     <button class="modal-close" onclick="closeAgentModal()">✕</button>
     <div class="modal-title">🤖 Agent Configuration</div>
     <div class="modal-sub">Create or edit an agent persona</div>
+
     <div class="form-group"><label>Agent Name</label><input type="text" id="am-name" placeholder="e.g. Priya — Tamil Support"></div>
+
+    <!-- TTS Language + Voice -->
     <div class="form-row">
-      <div class="form-group"><label>Language</label>
+      <div class="form-group"><label>TTS Language</label>
         <select id="am-tts-lang">
           <option value="hi-IN">Hindi (hi-IN)</option>
           <option value="en-IN">English India (en-IN)</option>
@@ -1441,7 +1486,7 @@ async def get_dashboard():
           <option value="ml-IN">Malayalam (ml-IN)</option>
         </select>
       </div>
-      <div class="form-group"><label>Voice</label>
+      <div class="form-group"><label>TTS Voice</label>
         <select id="am-voice">
           <option value="rohan">Rohan — Male</option>
           <option value="kavya">Kavya — Female</option>
@@ -1451,16 +1496,66 @@ async def get_dashboard():
           <option value="neha">Neha — Female</option>
           <option value="ritu">Ritu — Female</option>
           <option value="amit">Amit — Male</option>
+          <option value="ananya">Ananya — Female</option>
+          <option value="roopa">Roopa — Female</option>
+          <option value="pavithra">Pavithra — Female</option>
         </select>
       </div>
     </div>
-    <div class="form-group"><label>LLM Model</label>
-      <select id="am-llm">
-        <option value="gpt-4o-mini">gpt-4o-mini (Fast)</option>
-        <option value="gpt-4o">gpt-4o (Balanced)</option>
-        <option value="gpt-4.1-mini">gpt-4.1-mini (Latest Fast)</option>
-      </select>
+
+    <!-- STT Provider + Language -->
+    <div class="form-row">
+      <div class="form-group"><label>STT Provider (Transcriber)</label>
+        <select id="am-stt-provider">
+          <option value="sarvam">Sarvam AI (Indian langs)</option>
+          <option value="deepgram">Deepgram</option>
+          <option value="assemblyai">AssemblyAI</option>
+        </select>
+      </div>
+      <div class="form-group"><label>STT Language</label>
+        <select id="am-stt-lang">
+          <option value="unknown">Auto-detect 🌐</option>
+          <option value="hi-IN">Hindi</option>
+          <option value="en-IN">English India</option>
+          <option value="ta-IN">Tamil</option>
+          <option value="te-IN">Telugu</option>
+          <option value="kn-IN">Kannada</option>
+          <option value="ml-IN">Malayalam</option>
+          <option value="bn-IN">Bengali</option>
+          <option value="gu-IN">Gujarati</option>
+          <option value="mr-IN">Marathi</option>
+        </select>
+      </div>
     </div>
+
+    <!-- LLM Provider + Model -->
+    <div class="form-row">
+      <div class="form-group"><label>LLM Provider</label>
+        <select id="am-llm-provider" onchange="onProviderChange()">
+          <option value="openai">OpenAI</option>
+          <option value="groq">Groq (Fast/Free)</option>
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openrouter">OpenRouter (Any model)</option>
+        </select>
+      </div>
+      <div class="form-group"><label>LLM Model</label>
+        <select id="am-llm">
+          <option value="gpt-4.1-mini">gpt-4.1-mini (Latest Fast)</option>
+          <option value="gpt-4o-mini">gpt-4o-mini</option>
+          <option value="gpt-4o">gpt-4o (Balanced)</option>
+          <option value="gpt-4-turbo">gpt-4-turbo</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Provider API Key (shown for non-OpenAI) -->
+    <div class="form-group" id="am-api-key-row" style="display:none">
+      <label id="am-api-key-label">Provider API Key</label>
+      <input type="password" id="am-api-key" placeholder="sk-...">
+      <small style="color:var(--muted);font-size:11px">Stored per-agent. Leave blank to use the global key in Credentials.</small>
+    </div>
+
+    <!-- Temperature + Max Tokens -->
     <div class="form-row">
       <div class="form-group">
         <label>Temperature</label>
@@ -1469,18 +1564,33 @@ async def get_dashboard():
       </div>
       <div class="form-group">
         <label>Max Tokens</label>
-        <input type="number" id="am-max-tokens" min="50" max="2000" step="50" placeholder="250" value="250">
-        <small style="color:var(--muted);font-size:11px">Max words agent can reply with</small>
+        <input type="number" id="am-max-tokens" min="50" max="2000" step="50" placeholder="400" value="400">
+        <small style="color:var(--muted);font-size:11px">Max reply length</small>
       </div>
     </div>
-    <div class="form-group"><label>First Line (Fallback)</label><input type="text" id="am-first-line" placeholder="Namaste! Welcome to..."></div>
+
+    <!-- Endpointing + Max Turns -->
+    <div class="form-row">
+      <div class="form-group">
+        <label>Endpointing Delay (s)</label>
+        <input type="number" id="am-stt-delay" min="0.1" max="3.0" step="0.05" value="0.5">
+        <small style="color:var(--muted);font-size:11px">Pause before agent responds. 0.15 = snappy, 0.8 = patient</small>
+      </div>
+      <div class="form-group">
+        <label>Max Turns</label>
+        <input type="number" id="am-max-turns" min="5" max="100" step="1" value="25">
+        <small style="color:var(--muted);font-size:11px">Max back-and-forth exchanges per call</small>
+      </div>
+    </div>
+
+    <div class="form-group"><label>First Line (spoken on connect)</label><input type="text" id="am-first-line" placeholder="Namaste! Welcome to..."></div>
     <div class="form-group">
-      <label>Opening Greeting (spoken immediately on connect)</label>
+      <label>Opening Greeting (overrides First Line if set)</label>
       <input type="text" id="am-opening-greeting" placeholder="Namaste! Welcome to...">
     </div>
     <div class="form-group">
-      <label>System Instructions</label>
-      <textarea id="am-instructions" rows="6" placeholder="You are..."></textarea>
+      <label>System Instructions (the agent's personality + rules)</label>
+      <textarea id="am-instructions" rows="7" placeholder="You are..."></textarea>
       <!-- Prompt Analyzer badge — shown live as user types in instructions -->
       <div id="prompt-analyzer-badge" style="margin-top:8px;padding:10px 14px;border-radius:10px;font-size:13px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);display:none;">
         <span id="pa-token-count" style="font-weight:700"></span>
@@ -2369,6 +2479,25 @@ async function saveConfig(section) {{
         if (el && val !== null && val !== undefined) el.value = val;
       }});
       if (statusEl) {{ statusEl.style.opacity = 1; setTimeout(() => statusEl.style.opacity = 0, 2500); }}
+
+      // ── Also sync directly to the active agent DB row ──
+      // DB takes priority over config.json on every call, so we must keep both in sync.
+      if (section === 'agent' || section === 'system') {{
+        fetch('/api/active-agent', {{
+          method: 'PUT',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{
+            agentinstructions:      get('agent_instructions'),
+            firstline:             get('first_line'),
+            ttsvoice:              get('tts_voice'),
+            ttslanguage:           get('tts_language'),
+            sttminendpointingdelay: parseFloat(get('stt_min_endpointing_delay') || '0.5'),
+          }}),
+        }}).then(r => {{
+          if (!r.ok) console.warn('[SAVE] DB sync failed:', r.status);
+          else console.log('[SAVE] Active agent DB synced.');
+        }}).catch(e => console.warn('[SAVE] DB sync error:', e));
+      }}
     }} else {{
       const errMsg = saved.detail || saved.error || 'Unknown error';
       console.error('[SAVE] Failed:', errMsg);
@@ -2440,39 +2569,82 @@ async function deleteAgent(id) {{
 function editAgent(agent) {{
   editingAgentId = agent.id;
   const setVal = (id, val) => {{ const el = document.getElementById(id); if (el) el.value = (val !== undefined && val !== null) ? val : ''; }};
-  setVal('am-name',             agent.name                                    || '');
-  setVal('am-tts-lang',         agent.ttslanguage       || agent.tts_language  || 'hi-IN');
-  setVal('am-voice',            agent.ttsvoice          || agent.tts_voice     || 'kavya');
-  setVal('am-llm',              agent.llmmodel          || agent.llm_model     || 'gpt-4o-mini');
-  setVal('am-first-line',       agent.firstline         || agent.first_line    || '');
-  setVal('am-opening-greeting', agent.openinggreeting   || agent.opening_greeting || '');
-  setVal('am-instructions',     agent.agentinstructions || agent.agent_instructions || '');
-  setVal('am-temperature',      agent.temperature !== undefined ? agent.temperature : 0.3);
-  setVal('am-max-tokens',       agent.max_tokens  !== undefined ? agent.max_tokens  : 400);
+  const setOpt = (id, val) => {{ const el = document.getElementById(id); if (el && val) el.value = val; }};
+  setVal('am-name',             agent.name                                       || '');
+  setOpt('am-tts-lang',        agent.tts_language  || agent.ttslanguage          || 'hi-IN');
+  setOpt('am-voice',           agent.tts_voice     || agent.ttsvoice             || 'rohan');
+  setOpt('am-stt-provider',    agent.stt_provider  || agent.sttprovider          || 'sarvam');
+  setOpt('am-stt-lang',        agent.stt_language  || agent.sttlanguage          || 'unknown');
+  setOpt('am-llm-provider',    agent.llm_provider  || agent.llmprovider          || 'openai');
+  onProviderChange();  // repopulate model list for the stored provider
+  setOpt('am-llm',             agent.llm_model     || agent.llmmodel             || 'gpt-4.1-mini');
+  setVal('am-stt-delay',       agent.stt_min_endpointing_delay || agent.sttminendpointingdelay || 0.5);
+  setVal('am-max-turns',       agent.max_turns     || agent.maxturns             || 25);
+  setVal('am-first-line',      agent.first_line    || agent.firstline            || '');
+  setVal('am-opening-greeting',agent.openinggreeting || agent.opening_greeting   || '');
+  setVal('am-instructions',    agent.agent_instructions || agent.agentinstructions || '');
+  setVal('am-temperature',     agent.temperature !== undefined ? agent.temperature : 0.3);
+  setVal('am-max-tokens',      agent.max_tokens  !== undefined ? agent.max_tokens  : 400);
   document.getElementById('agent-modal').classList.add('open');
 }}
 function openAgentModal() {{ editingAgentId=null; document.getElementById('agent-modal').classList.add('open'); }}
 function closeAgentModal() {{ document.getElementById('agent-modal').classList.remove('open'); }}
 async function saveAgent() {{
   const g = id => document.getElementById(id)?.value;
+  const provider = g('am-llm-provider') || 'openai';
   const data = {{
-    name: g('am-name'),
-    ttslanguage: g('am-tts-lang'),
-    sttlanguage: g('am-tts-lang'),
-    ttsvoice: g('am-voice'),
-    llmmodel: g('am-llm'),
-    firstline: g('am-first-line'),
-    openinggreeting: g('am-opening-greeting'),
-    agentinstructions: g('am-instructions'),
-    temperature: parseFloat(g('am-temperature') || '0.3'),
-    max_tokens: parseInt(g('am-max-tokens') || '400'),
+    name:                   g('am-name'),
+    ttslanguage:            g('am-tts-lang'),
+    ttsvoice:               g('am-voice'),
+    sttprovider:            g('am-stt-provider'),
+    sttlanguage:            g('am-stt-lang'),
+    llmprovider:            provider,
+    llmmodel:               g('am-llm'),
+    sttminendpointingdelay: parseFloat(g('am-stt-delay') || '0.5'),
+    firstline:              g('am-first-line'),
+    openinggreeting:        g('am-opening-greeting'),
+    agentinstructions:      g('am-instructions'),
+    temperature:            parseFloat(g('am-temperature') || '0.3'),
+    max_tokens:             parseInt(g('am-max-tokens') || '400'),
+    maxturns:               parseInt(g('am-max-turns') || '25'),
+    // Provider-specific API key (only when non-OpenAI)
+    ...(provider === 'groq'       ? {{ groqapikey:       g('am-api-key') }} : {{}}),
+    ...(provider === 'anthropic'  ? {{ anthropicapikey:  g('am-api-key') }} : {{}}),
+    ...(provider === 'openrouter' ? {{ openrouterapikey: g('am-api-key') }} : {{}}),
   }};
+  console.log('[AGENT SAVE]', data);
   const url = editingAgentId ? `/api/agents/${{editingAgentId}}` : '/api/agents';
   const method = editingAgentId ? 'PUT' : 'POST';
   const res = await fetch(url, {{ method, headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(data) }});
-  if (!res.ok) {{ alert('Save failed. Check server logs.'); return; }}
+  if (!res.ok) {{ const e = await res.json().catch(()=>({{}})); alert('Save failed: '+(e.detail||'check logs')); return; }}
   closeAgentModal();
   loadAgents();
+}}
+
+// ── LLM Provider → dynamic model list ─────────────────────────────────────────
+const PROVIDER_MODELS = {{
+  openai:     ['gpt-4.1-mini','gpt-4o-mini','gpt-4o','gpt-4-turbo','o1-mini'],
+  groq:       ['llama-3.3-70b-versatile','llama-3.1-70b-versatile','mixtral-8x7b-32768','gemma2-9b-it'],
+  anthropic:  ['claude-3-5-haiku-20241022','claude-3-5-sonnet-20241022','claude-3-opus-20240229'],
+  openrouter: ['openai/gpt-4o-mini','anthropic/claude-3.5-haiku','meta-llama/llama-3.3-70b-instruct:free','google/gemma-2-9b-it:free'],
+}};
+
+function onProviderChange() {{
+  const provider  = document.getElementById('am-llm-provider')?.value || 'openai';
+  const modelSel  = document.getElementById('am-llm');
+  const keyRow    = document.getElementById('am-api-key-row');
+  const keyLabel  = document.getElementById('am-api-key-label');
+  if (modelSel) {{
+    modelSel.innerHTML = (PROVIDER_MODELS[provider] || PROVIDER_MODELS.openai).map(m =>
+      `<option value="${{m}}">${{m}}</option>`
+    ).join('');
+  }}
+  if (keyRow) {{
+    keyRow.style.display = provider === 'openai' ? 'none' : '';
+    if (keyLabel) keyLabel.textContent = {{
+      groq: 'Groq API Key', anthropic: 'Anthropic API Key', openrouter: 'OpenRouter API Key',
+    }}[provider] || 'API Key';
+  }}
 }}
 
 // Prompt analyzer — fires as user types in the instructions textarea

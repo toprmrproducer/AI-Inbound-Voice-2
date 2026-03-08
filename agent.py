@@ -73,18 +73,46 @@ agent_logger = logger.setLevel(logging.INFO)
 
 # ─────────────────────────── VERSION SAFE BUILDERS ────────────────────────────
 def build_llm(config: dict):
-    """Version-safe LLM builder."""
-    provider    = config.get('llm_provider', 'openai')
+    """Version-safe multi-provider LLM builder."""
+    provider    = (config.get('llm_provider') or 'openai').lower().strip()
     model       = config.get('llm_model', 'gpt-4.1-mini') or 'gpt-4.1-mini'
     temperature = float(config.get('temperature', 0.4))
     max_tokens  = int(config.get('max_tokens', 400))
 
     if provider == 'groq':
         try:
-            return openai_plugin.LLM.with_groq(model=model or 'llama-3.3-70b-versatile')
+            return openai_plugin.LLM.with_groq(
+                model=model or 'llama-3.3-70b-versatile',
+                temperature=temperature,
+            )
         except Exception as e:
-            logger.warning(f'[LLM] Groq fallback to OpenAI: {e}')
+            logger.warning(f'[LLM] Groq init failed, falling back to OpenAI: {e}')
 
+    elif provider == 'anthropic':
+        try:
+            from livekit.plugins import anthropic as anthropic_plugin
+            return anthropic_plugin.LLM(model=model or 'claude-3-5-haiku-20241022')
+        except Exception as e:
+            logger.warning(f'[LLM] Anthropic init failed, falling back to OpenAI: {e}')
+
+    elif provider == 'openrouter':
+        # OpenRouter is OpenAI-compatible — pass base_url + API key
+        or_key = (
+            config.get('openrouter_api_key')
+            or os.getenv('OPENROUTER_API_KEY', '')
+        )
+        try:
+            return openai_plugin.LLM(
+                model=model,
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
+                base_url='https://openrouter.ai/api/v1',
+                api_key=or_key,
+            )
+        except Exception as e:
+            logger.warning(f'[LLM] OpenRouter init failed, falling back to OpenAI: {e}')
+
+    # Default — OpenAI
     return openai_plugin.LLM(
         model=model,
         temperature=temperature,
@@ -696,17 +724,9 @@ async def entrypoint(ctx: JobContext):
     except Exception as e:
         logger.warning(f'[RECORDING] Failed to start: {e}')
 
-    # ── Start session (on_enter fires automatically — do NOT call session.say() here) ──
+    # ── Start session (on_enter fires the greeting automatically — do NOT call say() here) ──
     await start_session(session, ctx, agent, room_options)
-    logger.info('[AGENT] Session live — waiting for caller audio.')
-
-    # Force an opening line once the session is live
-    try:
-        opening_line = config.get("first_line") or config.get("opening_greeting") or "Namaste! How can I help you today?"
-        await agent.say(opening_line)
-        logger.info(f"[AGENT] Sent opening line: {opening_line}")
-    except Exception as e:
-        logger.warning(f"[AGENT] Failed to send opening line: {e}")
+    logger.info('[AGENT] Session live — on_enter() will speak the greeting.')
 
     try:
         from db import init_db

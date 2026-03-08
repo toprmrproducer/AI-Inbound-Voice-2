@@ -52,6 +52,19 @@ def init_db():
                     ) THEN
                         ALTER TABLE agents ADD COLUMN phone_numbers TEXT[] DEFAULT '{}';
                     END IF;
+
+                    -- Add new provider columns (multi-LLM support)
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='agents' AND column_name='llm_provider'
+                    ) THEN
+                        ALTER TABLE agents ADD COLUMN llm_provider TEXT DEFAULT 'openai';
+                        ALTER TABLE agents ADD COLUMN openrouter_api_key TEXT DEFAULT '';
+                        ALTER TABLE agents ADD COLUMN anthropic_api_key TEXT DEFAULT '';
+                        ALTER TABLE agents ADD COLUMN groq_api_key TEXT DEFAULT '';
+                        ALTER TABLE agents ADD COLUMN max_turns INTEGER DEFAULT 25;
+                        ALTER TABLE agents ADD COLUMN stt_min_endpointing_delay FLOAT DEFAULT 0.5;
+                    END IF;
                 END $$;
             """)
 
@@ -448,6 +461,10 @@ def create_agent(
     temperature=0.3,
     max_tokens=250,
     maxturns=20,
+    openrouterapikey="",
+    anthropicapikey="",
+    groqapikey="",
+    sttminendpointingdelay=0.5,
 ):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -456,13 +473,14 @@ def create_agent(
                     id, name, stt_provider, stt_language, llm_provider, llm_model,
                     tts_provider, tts_voice, tts_language, first_line, openinggreeting,
                     agent_instructions, system_prompt, temperature, max_tokens,
-                    max_turns, is_active
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE)
+                    max_turns, is_active, openrouter_api_key, anthropic_api_key, groq_api_key, stt_min_endpointing_delay
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,%s,%s,%s,%s)
                 RETURNING *
             """, (
                 str(agent_id), name, sttprovider, sttlanguage, llmprovider, llmmodel,
                 ttsprovider, ttsvoice, ttslanguage, firstline, openinggreeting,
-                agentinstructions, systemprompt, temperature, max_tokens, maxturns
+                agentinstructions, systemprompt, temperature, max_tokens, maxturns,
+                openrouterapikey, anthropicapikey, groqapikey, sttminendpointingdelay
             ))
             row = cur.fetchone()
             conn.commit()
@@ -472,7 +490,8 @@ def update_agent(agent_id: str, data: dict):
     allowed = {
         "name", "stt_provider", "stt_language", "llm_provider", "llm_model",
         "tts_provider", "tts_voice", "tts_language", "first_line", "openinggreeting",
-        "agent_instructions", "system_prompt", "temperature", "max_tokens", "max_turns"
+        "agent_instructions", "system_prompt", "temperature", "max_tokens", "max_turns",
+        "openrouter_api_key", "anthropic_api_key", "groq_api_key", "stt_min_endpointing_delay"
     }
     # Map from user payload to DB columns if needed, assuming user payload uses the exact matching keys or we rewrite it.
     # We will map them for safety:
@@ -487,7 +506,11 @@ def update_agent(agent_id: str, data: dict):
         "firstline": "first_line",
         "agentinstructions": "agent_instructions",
         "systemprompt": "system_prompt",
-        "maxturns": "max_turns"
+        "maxturns": "max_turns",
+        "openrouterapikey": "openrouter_api_key",
+        "anthropicapikey": "anthropic_api_key",
+        "groqapikey": "groq_api_key",
+        "sttminendpointingdelay": "stt_min_endpointing_delay"
     }
     fields = {}
     for k, v in data.items():
