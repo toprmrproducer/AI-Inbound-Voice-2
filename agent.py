@@ -1,3 +1,29 @@
+# ── VERSION GUARD ──────────────────────────────────────────────────────────
+import sys
+import importlib
+
+def _check_import(module: str, attr: str) -> bool:
+    try:
+        mod = importlib.import_module(module)
+        return hasattr(mod, attr)
+    except ImportError:
+        return False
+
+_MISSING = []
+if not _check_import('livekit.agents', 'AgentSession'):
+    _MISSING.append('livekit-agents not installed or broken')
+if not _check_import('livekit.agents.cli', 'run_app'):
+    _MISSING.append('cli.run_app missing — wrong livekit-agents version')
+if not _check_import('livekit.agents', 'RoomInputOptions'):
+    _MISSING.append('RoomInputOptions missing — wrong livekit-agents version')
+
+if _MISSING:
+    print("FATAL: Version incompatibility detected:")
+    for m in _MISSING:
+        print(f"  → {m}")
+    print("\nFix: pip install 'livekit-agents==1.4.2' --force-reinstall")
+    sys.exit(1)
+
 # agent.py — Clean Multilingual Voice Agent
 # Removed: watchdog, agent_is_speaking global, AutoLanguageAgent, filler filter,
 #           sentence splitter, before_tts_cb, double-say bug, RoomInputOptions (deprecated)
@@ -417,7 +443,13 @@ async def run_demo_session(ctx: JobContext):
     agent._session = session
     await session.start(room=ctx.room, agent=agent)
     # on_enter fires automatically — do NOT call session.say() here again
-    await ctx.wait_for_disconnect()
+    # Version-safe replacement for await ctx.wait_for_disconnect()
+    disconnect_event = asyncio.Event()
+    def _on_disconnect(*_):
+        disconnect_event.set()
+    ctx.room.on('participant_disconnected', _on_disconnect)
+    ctx.room.on('disconnected', _on_disconnect)
+    await disconnect_event.wait()
     logger.info(f'[DEMO] Session ended: {ctx.room.name}')
 
 
@@ -789,10 +821,16 @@ async def entrypoint(ctx: JobContext):
     ctx.add_shutdown_callback(on_shutdown)
 
     # Wait for the call to finish — this keeps the entrypoint alive
-    await ctx.wait_for_disconnect()
+    # Version-safe replacement for await ctx.wait_for_disconnect()
+    disconnect_event = asyncio.Event()
+    def _on_disconnect(*_):
+        disconnect_event.set()
+    ctx.room.on('participant_disconnected', _on_disconnect)
+    ctx.room.on('disconnected', _on_disconnect)
+    await disconnect_event.wait()
 
 
 # ─────────────────────────── WORKER ENTRY ─────────────────────────────────────
 # cli.run MUST be at module level, NOT inside entrypoint()
 if __name__ == '__main__':
-    cli.run(app=WorkerOptions(entrypoint_fnc=entrypoint, agent_name='outbound-caller'))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name='outbound-caller'))
