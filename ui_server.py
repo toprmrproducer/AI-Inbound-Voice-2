@@ -168,7 +168,34 @@ def get_active_agent_subtitle():
 
 @app.get("/api/active-agent")
 def api_active_agent():
-    return {"name": get_active_agent_name(), "subtitle": get_active_agent_subtitle()}
+    import db
+    try:
+        agent = db.get_active_agent()
+        if not agent:
+            return {"error": "No active agent"}
+        DB_TO_CONFIG = {
+            "agentinstructions":        "agent_instructions",
+            "openinggreeting":          "opening_greeting",
+            "firstline":                "first_line",
+            "llmmodel":                 "llm_model",
+            "llmprovider":              "llm_provider",
+            "ttsvoice":                 "tts_voice",
+            "ttslanguage":              "tts_language",
+            "sttlanguage":              "stt_language",
+            "sttminendpointingdelay":   "stt_min_endpointing_delay",
+            "temperature":              "temperature",
+            "max_tokens":               "max_tokens",
+        }
+        normalized = dict(agent)
+        for db_key, cfg_key in DB_TO_CONFIG.items():
+            if db_key in agent:
+                normalized[cfg_key] = agent[db_key]
+        normalized["name"] = agent.get("name", "AI Assistant")
+        normalized["subtitle"] = agent.get("subtitle", "Voice Agent")
+        return normalized
+    except Exception as e:
+        logger.error(f"[API] /api/active-agent failed: {e}")
+        return {"error": str(e)}
 
 # ── API Endpoints ──────────────────────────────────────────────────────────────
 
@@ -1071,13 +1098,66 @@ async def api_update_agent(agent_id: str, req: Request):
     import db
     data = await req.json()
     updated = db.update_agent(agent_id, data)
+    active = db.get_active_agent()
+    if active and str(active.get("id")) == str(agent_id):
+        cfg = read_config()
+        DB_TO_CONFIG = {
+            "agentinstructions":        "agent_instructions",
+            "openinggreeting":          "opening_greeting",
+            "firstline":                "first_line",
+            "llmmodel":                 "llm_model",
+            "llmprovider":              "llm_provider",
+            "ttsvoice":                 "tts_voice",
+            "ttslanguage":              "tts_language",
+            "ttsprovider":              "tts_provider",
+            "sttprovider":              "stt_provider",
+            "sttlanguage":              "stt_language",
+            "sttminendpointingdelay":   "stt_min_endpointing_delay",
+            "temperature":              "temperature",
+            "max_tokens":               "max_tokens",
+            "maxturns":                 "max_turns",
+        }
+        for db_key, cfg_key in DB_TO_CONFIG.items():
+            val = active.get(db_key)
+            if val is not None and val != "":
+                cfg[cfg_key] = val
+        write_config(cfg)
     return {"status": "ok", "agent": updated}
 
 @app.post("/api/agents/{agent_id}/activate")
 def api_activate_agent(agent_id: str):
     import db
-    db.set_active_agent(agent_id)
-    return {"status": "activated"}
+    try:
+        db.set_active_agent(agent_id)
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Agent not found or activation failed")
+    target = db.get_active_agent()
+    if target:
+        cfg = read_config()
+        DB_TO_CONFIG = {
+            "agentinstructions":        "agent_instructions",
+            "openinggreeting":          "opening_greeting",
+            "firstline":                "first_line",
+            "llmmodel":                 "llm_model",
+            "llmprovider":              "llm_provider",
+            "ttsvoice":                 "tts_voice",
+            "ttslanguage":              "tts_language",
+            "ttsprovider":              "tts_provider",
+            "sttprovider":              "stt_provider",
+            "sttlanguage":              "stt_language",
+            "sttminendpointingdelay":   "stt_min_endpointing_delay",
+            "temperature":              "temperature",
+            "max_tokens":               "max_tokens",
+            "maxturns":                 "max_turns",
+        }
+        for db_key, cfg_key in DB_TO_CONFIG.items():
+            val = target.get(db_key)
+            if val is not None and val != "":
+                cfg[cfg_key] = val
+        write_config(cfg)
+        logger.info(f"[AGENT] Activated agent {agent_id}, config.json updated with mapped keys")
+    return {"status": "activated", "agent": target}
 
 @app.delete("/api/agents/{agent_id}")
 def api_delete_agent(agent_id: str):

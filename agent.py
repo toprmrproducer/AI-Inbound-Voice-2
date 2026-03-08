@@ -69,7 +69,78 @@ except ImportError:
 from livekit.plugins import openai as openai_plugin, sarvam, silero
 
 logger      = logging.getLogger('outbound-agent')
-agent_logger = logging.getLogger('agent')
+agent_logger = logger.setLevel(logging.INFO)
+
+# ─────────────────────────── VERSION SAFE BUILDERS ────────────────────────────
+def build_llm(config: dict):
+    """Version-safe LLM builder."""
+    provider    = config.get('llm_provider', 'openai')
+    model       = config.get('llm_model', 'gpt-4.1-mini') or 'gpt-4.1-mini'
+    temperature = float(config.get('temperature', 0.4))
+    max_tokens  = int(config.get('max_tokens', 400))
+
+    if provider == 'groq':
+        try:
+            return openai_plugin.LLM.with_groq(model=model or 'llama-3.3-70b-versatile')
+        except Exception as e:
+            logger.warning(f'[LLM] Groq fallback to OpenAI: {e}')
+
+    return openai_plugin.LLM(
+        model=model,
+        temperature=temperature,
+        max_completion_tokens=max_tokens,
+    )
+
+def build_session(stt, llm, tts, vad, config: dict):
+    """Version-safe AgentSession builder."""
+    base_kwargs = dict(
+        stt=stt,
+        llm=llm,
+        tts=tts,
+        vad=vad,
+        turn_detection='stt',
+        allow_interruptions=True,
+        min_interruption_duration=0.0,
+        min_interruption_words=0,
+        min_endpointing_delay=float(config.get('stt_min_endpointing_delay', 0.5)),
+    )
+    optional = {'preemptive_generation': True}
+    for k, v in optional.items():
+        try:
+            import inspect
+            from livekit.agents import AgentSession as _AS
+            if k in inspect.signature(_AS.__init__).parameters:
+                base_kwargs[k] = v
+        except Exception:
+            pass
+    return AgentSession(**base_kwargs)
+
+async def start_session(session, ctx, agent, room_input_options=None):
+    """Version-safe session.start()"""
+    import inspect
+    sig = inspect.signature(session.start)
+    params = sig.parameters
+
+    if room_input_options is None:
+        await session.start(room=ctx.room, agent=agent)
+        return
+
+    if 'room_options' in params:
+        await session.start(room=ctx.room, agent=agent, room_options=room_input_options)
+    elif 'room_input_options' in params:
+        await session.start(room=ctx.room, agent=agent, room_input_options=room_input_options)
+    else:
+        await session.start(room=ctx.room, agent=agent)
+
+async def wait_for_disconnect(ctx):
+    """Version-safe disconnect wait."""
+    if hasattr(ctx, 'wait_for_disconnect'):
+        await ctx.wait_for_disconnect()
+    else:
+        done = asyncio.Event()
+        ctx.room.on('participant_disconnected', lambda *_: done.set())
+        ctx.room.on('disconnected', lambda *_: done.set())
+        await done.wait()
 
 # ─────────────────────────── LANGUAGE CONFIG ──────────────────────────────────
 LANGUAGE_CONFIG = {
@@ -413,13 +484,9 @@ async def run_demo_session(ctx: JobContext):
     agent_tools = AgentTools(caller_phone='demo', caller_name='Demo Visitor')
     agent       = VoiceAgent(tools=agent_tools, config=config)
 
-    session = AgentSession(
+    session = build_session(
         stt=sarvam.STT(model='saaras:v3', language='unknown', mode='transcribe', flush_signal=True),
-        llm=openai_plugin.LLM(
-            model=config.get('llm_model', 'gpt-4.1-mini'),
-            temperature=config.get('temperature', 0.4),
-            max_tokens=config.get('max_tokens', 400),
-        ),
+        llm=build_llm(config),
         tts=sarvam.TTS(
             model='bulbul:v3',
             speaker=get_lang_config(config.get('tts_language', 'hi-IN'))['speaker'],
@@ -434,22 +501,12 @@ async def run_demo_session(ctx: JobContext):
             deactivation_threshold=0.40,
             prefix_padding_duration=0.1,
         ),
-        turn_detection='stt',
-        min_interruption_duration=0.0,
-        min_interruption_words=0,
-        min_endpointing_delay=0.5,
-        allow_interruptions=True,
+        config=config,
     )
     agent._session = session
-    await session.start(room=ctx.room, agent=agent)
+    await start_session(session, ctx, agent)
     # on_enter fires automatically — do NOT call session.say() here again
-    # Version-safe replacement for await ctx.wait_for_disconnect()
-    disconnect_event = asyncio.Event()
-    def _on_disconnect(*_):
-        disconnect_event.set()
-    ctx.room.on('participant_disconnected', _on_disconnect)
-    ctx.room.on('disconnected', _on_disconnect)
-    await disconnect_event.wait()
+    await wait_for_disconnect(ctx)
     logger.info(f'[DEMO] Session ended: {ctx.room.name}')
 
 
@@ -549,25 +606,7 @@ async def entrypoint(ctx: JobContext):
     agent = VoiceAgent(tools=agent_tools, config=config)
 
     # ── Build LLM ─────────────────────────────────────────────────────────────
-    llm_provider = config.get('llm_provider', 'openai')
-    llm_model    = config.get('llm_model', 'gpt-4.1-mini')
-    temperature  = config.get('temperature', 0.4)
-    max_tokens   = config.get('max_tokens', 400)
-
-    if llm_provider == 'groq':
-        active_llm = openai_plugin.LLM.with_groq(model=llm_model or 'llama-3.3-70b-versatile')
-    elif llm_provider == 'anthropic':
-        active_llm = openai_plugin.LLM(
-            model='claude-haiku-3-5-latest',
-            base_url='https://api.anthropic.com/v1',
-            api_key=os.environ.get('ANTHROPIC_API_KEY', ''),
-        )
-    else:
-        active_llm = openai_plugin.LLM(
-            model=llm_model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+    active_llm = build_llm(config)
 
     # ── Build STT ─────────────────────────────────────────────────────────────
     active_stt = sarvam.STT(
@@ -608,17 +647,12 @@ async def entrypoint(ctx: JobContext):
             logger.warning(f'[AUDIO] BVC unavailable: {e}')
 
     # ── Session ───────────────────────────────────────────────────────────────
-    session = AgentSession(
+    session = build_session(
         stt=active_stt,
         llm=active_llm,
         tts=active_tts,
         vad=vad,
-        turn_detection='stt',
-        min_interruption_duration=0.0,
-        min_interruption_words=0,
-        min_endpointing_delay=config.get('stt_min_endpointing_delay', 0.5),
-        preemptive_generation=True,
-        allow_interruptions=True,
+        config=config,
     )
     agent._session = session  # so on_user_turn_completed can swap TTS
 
@@ -657,7 +691,7 @@ async def entrypoint(ctx: JobContext):
         logger.warning(f'[RECORDING] Failed to start: {e}')
 
     # ── Start session (on_enter fires automatically — do NOT call session.say() here) ──
-    await session.start(room=ctx.room, agent=agent, room_input_options=room_options)
+    await start_session(session, ctx, agent, room_options)
     logger.info('[AGENT] Session live — waiting for caller audio.')
 
     try:
@@ -821,13 +855,7 @@ async def entrypoint(ctx: JobContext):
     ctx.add_shutdown_callback(on_shutdown)
 
     # Wait for the call to finish — this keeps the entrypoint alive
-    # Version-safe replacement for await ctx.wait_for_disconnect()
-    disconnect_event = asyncio.Event()
-    def _on_disconnect(*_):
-        disconnect_event.set()
-    ctx.room.on('participant_disconnected', _on_disconnect)
-    ctx.room.on('disconnected', _on_disconnect)
-    await disconnect_event.wait()
+    await wait_for_disconnect(ctx)
 
 
 # ─────────────────────────── WORKER ENTRY ─────────────────────────────────────
