@@ -1184,33 +1184,37 @@ def api_activate_agent(agent_id: str):
     try:
         db.set_active_agent(agent_id)
     except Exception as e:
-        from fastapi import HTTPException
-        raise HTTPException(404, "Agent not found or activation failed")
+        raise HTTPException(status_code=404, detail="Agent not found or activation failed")
     target = db.get_active_agent()
     if target:
         cfg = read_config()
-        DB_TO_CONFIG = {
-            "agentinstructions":        "agent_instructions",
-            "openinggreeting":          "opening_greeting",
-            "firstline":                "first_line",
-            "llmmodel":                 "llm_model",
-            "llmprovider":              "llm_provider",
-            "ttsvoice":                 "tts_voice",
-            "ttslanguage":              "tts_language",
-            "ttsprovider":              "tts_provider",
-            "sttprovider":              "stt_provider",
-            "sttlanguage":              "stt_language",
-            "sttminendpointingdelay":   "stt_min_endpointing_delay",
-            "temperature":              "temperature",
-            "max_tokens":               "max_tokens",
-            "maxturns":                 "max_turns",
-        }
-        for db_key, cfg_key in DB_TO_CONFIG.items():
-            val = target.get(db_key)
+        # Each entry: (snake_case_db_col, camelcase_alias, config_key)
+        # We try snake_case first (actual Postgres column), then camelCase fallback
+        FIELD_MAP = [
+            ("agent_instructions",        "agentinstructions",       "agent_instructions"),
+            ("openinggreeting",           "openinggreeting",          "opening_greeting"),
+            ("first_line",                "firstline",                "first_line"),
+            ("llm_model",                 "llmmodel",                 "llm_model"),
+            ("llm_provider",              "llmprovider",              "llm_provider"),
+            ("tts_voice",                 "ttsvoice",                 "tts_voice"),
+            ("tts_language",              "ttslanguage",              "tts_language"),
+            ("tts_provider",              "ttsprovider",              "tts_provider"),
+            ("stt_provider",              "sttprovider",              "stt_provider"),
+            ("stt_language",              "sttlanguage",              "stt_language"),
+            ("stt_min_endpointing_delay", "sttminendpointingdelay",   "stt_min_endpointing_delay"),
+            ("temperature",               "temperature",              "temperature"),
+            ("max_tokens",                "max_tokens",               "max_tokens"),
+            ("max_turns",                 "maxturns",                 "max_turns"),
+        ]
+        written = {}
+        for snake, camel, cfg_key in FIELD_MAP:
+            val = target.get(snake) or target.get(camel)
             if val is not None and val != "":
                 cfg[cfg_key] = val
+                written[cfg_key] = val
         write_config(cfg)
-        logger.info(f"[AGENT] Activated agent {agent_id}, config.json updated with mapped keys")
+        logger.info(f"[AGENT] Activated {target.get('name')} ({agent_id}). Config updated: {list(written.keys())}")
+        logger.info(f"[AGENT] First line: '{written.get('first_line', '')}' | Greeting: '{written.get('opening_greeting', '')}'")
     return {"status": "activated", "agent": target}
 
 @app.delete("/api/agents/{agent_id}")
