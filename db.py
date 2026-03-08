@@ -248,7 +248,10 @@ def init_db():
                     custom_data JSONB,
                     status TEXT DEFAULT 'pending',
                     call_attempts INTEGER DEFAULT 0,
+                    retry_count INTEGER DEFAULT 0,
+                    notes TEXT,
                     last_call_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
@@ -289,6 +292,11 @@ def init_db():
                 ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS campaign_id INTEGER;
                 ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS lead_id UUID;
                 ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS room_id TEXT;
+
+                -- leads new columns
+                ALTER TABLE leads ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
+                ALTER TABLE leads ADD COLUMN IF NOT EXISTS notes TEXT;
+                ALTER TABLE leads ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
                 -- sip_trunks columns
                 ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS sip_uri TEXT;
