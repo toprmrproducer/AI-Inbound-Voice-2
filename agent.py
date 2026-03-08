@@ -35,7 +35,7 @@ load_dotenv()
 
 import pytz
 from livekit import api
-from livekit.agents import Agent, AgentSession, JobContext, RoomOptions, WorkerOptions, cli, llm
+from livekit.agents import Agent, AgentSession, JobContext, RoomInputOptions, WorkerOptions, cli, llm
 try:
     from livekit.agents import noisecancellation as nc
 except ImportError:
@@ -564,12 +564,11 @@ async def entrypoint(ctx: JobContext):
         prefix_padding_duration=0.1,
     )
 
-    # ── Noise cancellation (uses new RoomOptions, not deprecated RoomInputOptions) ──
-    room_options = RoomOptions(close_on_disconnect=False)
+    # ── Noise cancellation (uses RoomInputOptions for LiveKit 1.4.2 compatibility) ──
+    room_options = RoomInputOptions()
     if nc is not None:
         try:
-            room_options = RoomOptions(
-                close_on_disconnect=False,
+            room_options = RoomInputOptions(
                 noise_cancellation=nc.BVC(),
             )
             logger.info('[AUDIO] BVC noise cancellation enabled')
@@ -626,7 +625,7 @@ async def entrypoint(ctx: JobContext):
         logger.warning(f'[RECORDING] Failed to start: {e}')
 
     # ── Start session (on_enter fires automatically — do NOT call session.say() here) ──
-    await session.start(room=ctx.room, agent=agent, room_options=room_options)
+    await session.start(room=ctx.room, agent=agent, room_input_options=room_options)
     logger.info('[AGENT] Session live — waiting for caller audio.')
 
     try:
