@@ -496,10 +496,8 @@ class VoiceAgent(Agent):
             or 'Namaste! How can I help you today?'
         )
         logger.info(f'[GREETING] Will say: {greeting!r}')
-        await self.session.generate_reply(
-            instructions=f"Say exactly this phrase without adding anything else: '{greeting}'"
-        )
-        logger.info("[GREETING] session.generate_reply() completed")
+        await self.session.say(greeting, allow_interruptions=True)
+        logger.info('[GREETING] session.say() completed')
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """

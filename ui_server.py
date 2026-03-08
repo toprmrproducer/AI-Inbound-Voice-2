@@ -170,7 +170,7 @@ def get_active_agent_name():
 def get_active_agent_subtitle():
     import db
     ag = db.get_inbound_active_agent() or db.get_outbound_active_agent()
-    return ag.subtitle if ag else "Voice Agent"
+    return ag.get("subtitle", "Voice Agent") if ag else "Voice Agent"
 
 @app.get("/api/active-agent")
 def api_active_agent():
@@ -182,22 +182,22 @@ def api_active_agent():
         
         # UI expects specific keys
         return {
-            "id": agent.id,
-            "name": agent.name,
-            "subtitle": agent.subtitle,
-            "agentinstructions": agent.system_prompt,
-            "openinggreeting": agent.opening_greeting,
-            "firstline": agent.first_line,
-            "llmmodel": agent.llm_model,
-            "llmprovider": agent.llm_provider,
-            "ttsvoice": agent.tts_voice,
-            "ttslanguage": agent.tts_language,
-            "sttlanguage": agent.stt_language,
-            "sttminendpointingdelay": agent.stt_min_endpointing_delay,
-            "temperature": agent.temperature,
-            "max_tokens": agent.max_tokens,
-            "ttsprovider": agent.tts_provider,
-            "sttprovider": agent.stt_provider,
+            "id": agent.get("id"),
+            "name": agent.get("name"),
+            "subtitle": agent.get("subtitle"),
+            "agentinstructions": agent.get("system_prompt"),
+            "openinggreeting": agent.get("opening_greeting"),
+            "firstline": agent.get("first_line"),
+            "llmmodel": agent.get("llm_model"),
+            "llmprovider": agent.get("llm_provider"),
+            "ttsvoice": agent.get("tts_voice"),
+            "ttslanguage": agent.get("tts_language"),
+            "sttlanguage": agent.get("stt_language"),
+            "sttminendpointingdelay": agent.get("stt_min_endpointing_delay"),
+            "temperature": agent.get("temperature"),
+            "max_tokens": agent.get("max_tokens"),
+            "ttsprovider": agent.get("tts_provider"),
+            "sttprovider": agent.get("stt_provider"),
         }
     except Exception as e:
         logger.error(f"[API] /api/active-agent failed: {e}")
@@ -212,7 +212,7 @@ async def api_put_active_agent(request: Request):
         active = db.get_inbound_active_agent() or db.get_outbound_active_agent()
         if not active:
             raise HTTPException(status_code=404, detail="No active agent.")
-        db.update_agent(active.id, data)
+        db.update_agent(active.get("id"), data)
         return {"ok": True}
     except Exception as e:
         logger.error(f"[API] PUT /api/active-agent error: {e}")
@@ -1140,7 +1140,7 @@ def api_activate_agent(agent_id: str):
     try:
         db.set_active_agent(agent_id, mode='inbound')
         target = db.get_agent_by_id(agent_id)
-        return {"status": "activated", "agent": target.__dict__ if target else None}
+        return {"status": "activated", "agent": target if target else None}
     except Exception as e:
         raise HTTPException(status_code=404, detail="Agent not found or activation failed")
 
@@ -1158,8 +1158,8 @@ def api_activate_inbound(agent_id: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
     target = db.get_inbound_active_agent()
-    logger.info(f"[AGENT] Set INBOUND agent: {target.name if target else None} ({agent_id})")
-    return {"status": "inbound_activated", "agent": target.__dict__ if target else None}
+    logger.info(f"[AGENT] Set INBOUND agent: {target.get('name') if target else None} ({agent_id})")
+    return {"status": "inbound_activated", "agent": target if target else None}
 
 @app.post("/api/agents/{agent_id}/activate-outbound")
 def api_activate_outbound(agent_id: str):
@@ -1169,8 +1169,8 @@ def api_activate_outbound(agent_id: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
     target = db.get_outbound_active_agent()
-    logger.info(f"[AGENT] Set OUTBOUND agent: {target.name if target else None} ({agent_id})")
-    return {"status": "outbound_activated", "agent": target.__dict__ if target else None}
+    logger.info(f"[AGENT] Set OUTBOUND agent: {target.get('name') if target else None} ({agent_id})")
+    return {"status": "outbound_activated", "agent": target if target else None}
 
 # ── Main Dashboard HTML ────────────────────────────────────────────────────────
 
