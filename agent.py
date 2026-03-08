@@ -71,13 +71,15 @@ from livekit.plugins import openai as openai_plugin, sarvam, silero
 logger      = logging.getLogger('outbound-agent')
 agent_logger = logger.setLevel(logging.INFO)
 
+from models import AgentConfig
+
 # ─────────────────────────── VERSION SAFE BUILDERS ────────────────────────────
-def build_llm(config: dict):
+def build_llm(cfg: AgentConfig):
     """Version-safe multi-provider LLM builder."""
-    provider    = (config.get('llm_provider') or 'openai').lower().strip()
-    model       = config.get('llm_model', 'gpt-4.1-mini') or 'gpt-4.1-mini'
-    temperature = float(config.get('temperature', 0.4))
-    max_tokens  = int(config.get('max_tokens', 400))
+    provider    = cfg.llm_provider.lower().strip()
+    model       = cfg.llm_model
+    temperature = cfg.temperature
+    max_tokens  = cfg.max_tokens
 
     if provider == 'groq':
         try:
@@ -97,16 +99,13 @@ def build_llm(config: dict):
 
     elif provider == 'openrouter':
         # OpenRouter is OpenAI-compatible — pass base_url + API key
-        or_key = (
-            config.get('openrouter_api_key')
-            or os.getenv('OPENROUTER_API_KEY', '')
-        )
+        or_key = os.getenv('OPENROUTER_API_KEY', '')
         try:
             return openai_plugin.LLM(
                 model=model,
                 temperature=temperature,
                 max_completion_tokens=max_tokens,
-                base_url='https://openrouter.ai/api/v1',
+                base_url=cfg.llm_base_url or 'https://openrouter.ai/api/v1',
                 api_key=or_key,
             )
         except Exception as e:
@@ -119,7 +118,24 @@ def build_llm(config: dict):
         max_completion_tokens=max_tokens,
     )
 
-def build_session(stt, llm, tts, vad, config: dict):
+def build_stt(cfg: AgentConfig):
+    return sarvam.STT(
+        model=cfg.stt_model,
+        language=cfg.stt_language,
+        mode='transcribe',
+        flush_signal=True,
+    )
+
+def build_tts(cfg: AgentConfig):
+    return sarvam.TTS(
+        model=cfg.tts_model,
+        speaker=cfg.tts_voice,
+        target_language_code=cfg.tts_language,
+        enable_preprocessing=True,
+        pace=0.95,
+    )
+
+def build_session(stt, llm, tts, vad, cfg: AgentConfig):
     """Version-safe AgentSession builder."""
     base_kwargs = dict(
         stt=stt,
@@ -130,7 +146,7 @@ def build_session(stt, llm, tts, vad, config: dict):
         allow_interruptions=True,
         min_interruption_duration=0.0,
         min_interruption_words=0,
-        min_endpointing_delay=float(config.get('stt_min_endpointing_delay', 0.5)),
+        min_endpointing_delay=cfg.stt_min_endpointing_delay,
     )
     optional = {'preemptive_generation': True}
     for k, v in optional.items():
@@ -207,72 +223,78 @@ def is_rate_limited(phone: str) -> bool:
     return False
 
 # ─────────────────────────── CONFIG LOADER ────────────────────────────────────
-def get_live_config(phone: str = None) -> dict:
-    """Load agent config from DB — phone-specific agent first, then active agent, then config.json."""
-    try:
-        import db as _db
-        # Phone-specific routing: if phone is set, find agent assigned to that number
-        # Falls back to active agent if no specific match
-        if phone:
-            active = _db.get_agent_for_phone(phone)
-        else:
-            active = _db.get_active_agent()
+from db import get_inbound_active_agent, get_outbound_active_agent, get_agent_by_id
 
-        if active:
-            # DB stores columns as snake_case — read them directly
-            return {
-                'agent_instructions':        active.get('agent_instructions') or active.get('agentinstructions', ''),
-                'opening_greeting':          active.get('openinggreeting', ''),
-                'first_line':                active.get('first_line') or active.get('firstline', ''),
-                'llm_model':                 active.get('llm_model') or active.get('llmmodel', 'gpt-4.1-mini'),
-                'llm_provider':              active.get('llm_provider') or active.get('llmprovider', 'openai'),
-                'openrouter_api_key':        active.get('openrouter_api_key', ''),
-                'anthropic_api_key':         active.get('anthropic_api_key', ''),
-                'groq_api_key':              active.get('groq_api_key', ''),
-                'tts_voice':                 active.get('tts_voice') or active.get('ttsvoice', 'rohan'),
-                'tts_language':              active.get('tts_language') or active.get('ttslanguage', 'hi-IN'),
-                'tts_provider':              active.get('tts_provider') or active.get('ttsprovider', 'sarvam'),
-                'stt_provider':              active.get('stt_provider') or active.get('sttprovider', 'sarvam'),
-                'stt_language':              active.get('stt_language') or active.get('sttlanguage', 'unknown'),
-                'stt_min_endpointing_delay': float(active.get('stt_min_endpointing_delay') or active.get('sttminendpointingdelay') or 0.5),
-                'temperature':               float(active.get('temperature') or 0.4),
-                'max_tokens':                int(active.get('max_tokens') or 400),
-                'max_turns':                 int(active.get('max_turns') or active.get('maxturns') or 25),
-                '_agent_name':               active.get('name', 'AI Assistant'),
-                '_agent_id':                 active.get('id', ''),
-            }
-    except Exception as e:
-        logger.warning(f'[CONFIG] DB load failed, fallback: {e}')
-
-    cfg = {}
-    for path in ([f'configs/{phone.replace("+","")}.json'] if phone else []) + ['configs/default.json', 'config.json']:
+def load_agent_config(meta: dict) -> AgentConfig:
+    """
+    OG Option B: Check DB agents table first, then fall back to file configs.
+    Maps everything to strict AgentConfig dataclass.
+    """
+    agent_id = meta.get('agent_id')
+    phone = meta.get('phone_number') or meta.get('to') or meta.get('destination')
+    
+    raw_cfg = {}
+    
+    if agent_id:
+        db_agent = get_agent_by_id(agent_id)
+        if db_agent:
+            raw_cfg = db_agent
+            logger.info(f'[CONFIG] Loaded agent from DB: {db_agent.get("name")}')
+    elif phone:
+        db_agent = get_outbound_active_agent()
+        if db_agent:
+            raw_cfg = db_agent
+            logger.info(f'[CONFIG] Loaded outbound active DB agent: {db_agent.get("name")}')
+    else:
+        db_agent = get_inbound_active_agent()
+        if db_agent:
+            raw_cfg = db_agent
+            logger.info(f'[CONFIG] Loaded inbound active DB agent: {db_agent.get("name")}')
+            
+    # Fall back to file-based config
+    file_cfg = {}
+    paths = []
+    if phone and phone != 'unknown':
+        paths.append(f"configs/{phone.replace('+','')}.json")
+    paths += ["configs/default.json", "config.json"]
+    
+    for path in paths:
         if os.path.exists(path):
             try:
                 with open(path) as f:
-                    cfg = json.load(f)
-                break
-            except Exception:
-                pass
+                    file_cfg = json.load(f)
+                    logger.info(f"[CONFIG] Merged file fallback: {path}")
+                    break
+            except Exception as e:
+                logger.error(f"[CONFIG] Failed to read {path}: {e}")
 
-    def v(key, env_key, default):
-        return cfg.get(key) or os.getenv(env_key, default)
-
-    return {
-        'agent_instructions':        v('agent_instructions', 'AGENT_INSTRUCTIONS', ''),
-        'opening_greeting':          v('opening_greeting', 'OPENING_GREETING', ''),
-        'first_line':                v('first_line', 'FIRST_LINE', 'Namaste! How can I help you today?'),
-        'llm_model':                 v('llm_model', 'LLM_MODEL', 'gpt-4.1-mini'),
-        'llm_provider':              v('llm_provider', 'LLM_PROVIDER', 'openai'),
-        'tts_voice':                 v('tts_voice', 'TTS_VOICE', 'rohan'),
-        'tts_language':              v('tts_language', 'TTS_LANGUAGE', 'hi-IN'),
-        'tts_provider':              v('tts_provider', 'TTS_PROVIDER', 'sarvam'),
-        'stt_provider':              v('stt_provider', 'STT_PROVIDER', 'sarvam'),
-        'stt_language':              v('stt_language', 'STT_LANGUAGE', 'unknown'),
-        'stt_min_endpointing_delay': float(v('stt_min_endpointing_delay', 'STT_MIN_ENDPOINTING_DELAY', '0.5')),
-        'temperature':               float(v('temperature', 'TEMPERATURE', '0.4')),
-        'max_tokens':                int(v('max_tokens', 'MAX_TOKENS', '400')),
-        'max_turns':                 int(v('max_turns', 'MAX_TURNS', '25')),
-    }
+    def _val(db_key, file_key, def_val):
+        v = raw_cfg.get(db_key) or raw_cfg.get(file_key)
+        if v is None or str(v).strip() == "":
+            v = file_cfg.get(file_key)
+        if v is None or str(v).strip() == "":
+            v = def_val
+        return v
+        
+    return AgentConfig(
+        id=raw_cfg.get('id'),
+        name=raw_cfg.get('name', 'AI Assistant'),
+        subtitle=raw_cfg.get('subtitle', ''),
+        system_prompt=_val("agentinstructions", "agent_instructions", ""),
+        opening_greeting=_val("openinggreeting", "opening_greeting", ""),
+        first_line=_val("firstline", "first_line", "Namaste! How can I help you today?"),
+        llm_provider=_val("llmprovider", "llm_provider", "openai"),
+        llm_model=_val("llmmodel", "llm_model", "gpt-4o-mini"),
+        temperature=float(_val("temperature", "temperature", 0.4)),
+        max_tokens=int(_val("max_tokens", "max_tokens", 400)),
+        max_turns=int(_val("maxturns", "max_turns", 25)),
+        tts_provider=_val("ttsprovider", "tts_provider", "sarvam"),
+        tts_voice=_val("ttsvoice", "tts_voice", "kavya"),
+        tts_language=_val("ttslanguage", "tts_language", "hi-IN"),
+        stt_provider=_val("sttprovider", "stt_provider", "sarvam"),
+        stt_language=_val("sttlanguage", "stt_language", "unknown"),
+        stt_min_endpointing_delay=float(_val("sttminendpointingdelay", "stt_min_endpointing_delay", 0.5))
+    )
 
 # ─────────────────────────── IST TIME CONTEXT ────────────────────────────────
 def get_ist_context() -> str:
@@ -429,14 +451,14 @@ class VoiceAgent(Agent):
     No watchdog, no global state, no filler filter.
     """
 
-    def __init__(self, tools: AgentTools, config: dict):
+    def __init__(self, tools: AgentTools, cfg: AgentConfig):
         self._tools       = tools
-        self._config      = config
+        self._cfg         = cfg
         self._session     = None     # set after session.start()
         self._lang_locked = False
-        self._lang        = config.get('tts_language', 'hi-IN')
+        self._lang        = cfg.tts_language
 
-        instructions = self._build_instructions(config.get('agent_instructions', ''))
+        instructions = self._build_instructions(cfg.system_prompt)
 
         try:
             import tiktoken
@@ -467,13 +489,17 @@ class VoiceAgent(Agent):
         return base + get_ist_context() + voice_rules
 
     async def on_enter(self):
-        """Called once by AgentSession after session.start(). Speak greeting, nothing else."""
+        """Called once by AgentSession after session.start(). Speak greeting using generate_reply per OG."""
         greeting = (
-            self._config.get('opening_greeting')
-            or self._config.get('first_line')
+            self._cfg.first_line
+            or self._cfg.opening_greeting
             or 'Namaste! How can I help you today?'
         )
-        await self.session.say(greeting, allow_interruptions=True)
+        logger.info(f'[GREETING] Will say: {greeting!r}')
+        await self.session.generate_reply(
+            instructions=f"Say exactly this phrase without adding anything else: '{greeting}'"
+        )
+        logger.info("[GREETING] session.generate_reply() completed")
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """
@@ -503,7 +529,7 @@ class VoiceAgent(Agent):
                     f'Do NOT switch to any other language under any circumstances.\n'
                 )
                 self.instructions = lang_lock + self._build_instructions(
-                    self._config.get('agent_instructions', '')
+                    self._cfg.system_prompt
                 )
 
                 # Swap TTS speaker to match language
@@ -526,20 +552,14 @@ class VoiceAgent(Agent):
 # ─────────────────────────── DEMO SESSION ────────────────────────────────────
 async def run_demo_session(ctx: JobContext):
     logger.info(f'[DEMO] Browser session: {ctx.room.name}')
-    config      = get_live_config()
+    cfg         = load_agent_config({'phone_number': 'demo'})
     agent_tools = AgentTools(caller_phone='demo', caller_name='Demo Visitor')
-    agent       = VoiceAgent(tools=agent_tools, config=config)
+    agent       = VoiceAgent(tools=agent_tools, cfg=cfg)
 
     session = build_session(
-        stt=sarvam.STT(model='saaras:v3', language='unknown', mode='transcribe', flush_signal=True),
-        llm=build_llm(config),
-        tts=sarvam.TTS(
-            model='bulbul:v3',
-            speaker=get_lang_config(config.get('tts_language', 'hi-IN'))['speaker'],
-            target_language_code=config.get('tts_language', 'hi-IN'),
-            enable_preprocessing=True,
-            pace=0.95,
-        ),
+        stt=build_stt(cfg),
+        llm=build_llm(cfg),
+        tts=build_tts(cfg),
         vad=silero.VAD.load(
             min_speech_duration=0.05,
             min_silence_duration=0.8,
@@ -547,7 +567,7 @@ async def run_demo_session(ctx: JobContext):
             deactivation_threshold=0.40,
             prefix_padding_duration=0.1,
         ),
-        config=config,
+        cfg=cfg,
     )
     agent._session = session
     await start_session(session, ctx, agent)
@@ -637,7 +657,10 @@ async def entrypoint(ctx: JobContext):
             break
 
     # ── Load config based on mode (inbound/outbound) and optional campaign agent ──
-    config = get_live_config(phone_number, mode=mode, agent_id=campaign_agent_id)
+    try:
+        cfg = load_agent_config(meta if isinstance(meta, dict) else {})
+    except NameError:
+        cfg = load_agent_config({})  # in case meta wasn't bound
 
     # Inject caller history if exists
     if caller_phone != 'unknown':
@@ -651,7 +674,7 @@ async def entrypoint(ctx: JobContext):
                     f'\n[CALLER HISTORY] Last call: {str(last.get("created_at",""))[:10]}. '
                     f'Summary: {last.get("summary", "N/A")}\n'
                 )
-                config['agent_instructions'] = config.get('agent_instructions', '') + history_note
+                cfg.system_prompt = cfg.system_prompt + history_note
         except Exception as e:
             logger.warning(f'[HISTORY] Could not load: {e}')
 
@@ -661,28 +684,16 @@ async def entrypoint(ctx: JobContext):
     agent_tools.ctx_api      = ctx.api
     agent_tools.room_name    = ctx.room.name
 
-    agent = VoiceAgent(tools=agent_tools, config=config)
+    agent = VoiceAgent(tools=agent_tools, cfg=cfg)
 
     # ── Build LLM ─────────────────────────────────────────────────────────────
-    active_llm = build_llm(config)
+    active_llm = build_llm(cfg)
 
     # ── Build STT ─────────────────────────────────────────────────────────────
-    active_stt = sarvam.STT(
-        model='saaras:v3',
-        language='unknown',   # auto-detect, locked after first turn in agent
-        mode='transcribe',
-        flush_signal=True,
-    )
+    active_stt = build_stt(cfg)
 
     # ── Build TTS ─────────────────────────────────────────────────────────────
-    tts_lang   = config.get('tts_language', 'hi-IN')
-    active_tts = sarvam.TTS(
-        model='bulbul:v3',
-        speaker=get_lang_config(tts_lang)['speaker'],
-        target_language_code=tts_lang,
-        enable_preprocessing=True,
-        pace=0.95,
-    )
+    active_tts = build_tts(cfg)
 
     # ── VAD ───────────────────────────────────────────────────────────────────
     vad = silero.VAD.load(
@@ -710,9 +721,40 @@ async def entrypoint(ctx: JobContext):
         llm=active_llm,
         tts=active_tts,
         vad=vad,
-        config=config,
+        cfg=cfg,
     )
     agent._session = session  # so on_user_turn_completed can swap TTS
+
+    # ── Real-time Transcripts Streaming ───────────────────────────────────────
+    async def _log_transcript(role: str, content: str):
+        try:
+            from db import get_supabase
+            sb = get_supabase()
+            if sb:
+                sb.table("call_transcripts").insert({
+                    "call_room_id": ctx.room.name,
+                    "phone": caller_phone,
+                    "role": role,
+                    "content": content,
+                }).execute()
+        except Exception as e:
+            logger.debug(f"[TRANSCRIPT-STREAM] {e}")
+
+    @session.on("user_speech_committed")
+    def on_user_speech(msg):
+        text = getattr(msg, 'text', '') or getattr(msg, 'content', '')
+        if hasattr(msg, 'user_transcript'):
+            text = msg.user_transcript
+        if isinstance(text, str) and text.strip():
+            asyncio.create_task(_log_transcript("user", text.strip()))
+
+    @session.on("agent_speech_committed")
+    def on_agent_speech(msg):
+        text = getattr(msg, 'text', '') or getattr(msg, 'content', '')
+        if hasattr(msg, 'agent_transcript'):
+            text = msg.agent_transcript
+        if isinstance(text, str) and text.strip():
+            asyncio.create_task(_log_transcript("assistant", text.strip()))
 
     # ── Recording ─────────────────────────────────────────────────────────────
     egress_id     = None
@@ -781,7 +823,7 @@ async def entrypoint(ctx: JobContext):
                         booking_time_iso=intent['start_time'],
                         booking_id=result.get('booking_id'),
                         notes=intent.get('notes', ''),
-                        tts_voice=config.get('tts_voice', 'rohan'),
+                        tts_voice=cfg.tts_voice,
                         ai_summary='',
                     )
                     logger.info(f'Post-call booking executed and notification sent.')
@@ -795,7 +837,7 @@ async def entrypoint(ctx: JobContext):
                 caller_name=agent_tools.caller_name,
                 caller_phone=agent_tools.caller_phone,
                 call_summary='Caller did not schedule an appointment.',
-                tts_voice=config.get('tts_voice', 'rohan'),
+                tts_voice=cfg.tts_voice,
                 duration_seconds=int((datetime.now() - call_start).total_seconds()),
             )
 
@@ -820,11 +862,11 @@ async def entrypoint(ctx: JobContext):
         try:
             msgs = []
             for msg in agent.chat_ctx.messages:
-                content = getattr(msg, 'content', None)
+                content = getattr(msg, 'content', None) or getattr(msg, 'text', None)
                 if isinstance(content, list):
                     content = ' '.join(str(c) for c in content if isinstance(c, str))
                 if content:
-                    msgs.append(f'{msg.role.upper()}: {content}')
+                    msgs.append(f'{getattr(msg, "role", "unknown").upper()}: {content}')
             transcript_text = '\n'.join(msgs)
         except Exception as e:
             logger.error(f'[TRANSCRIPT] Could not read: {e}')
@@ -901,8 +943,7 @@ async def entrypoint(ctx: JobContext):
                 call_hour=call_dt.hour,
                 call_day_of_week=call_dt.strftime('%A'),
                 was_booked=bool(agent_tools.booking_intent),
-                stt_provider=config.get('stt_provider', 'sarvam'),
-                tts_provider=config.get('tts_provider', 'sarvam'),
+                audio_codec='opus',
             )
             logger.info(f'[DB] Call log saved for {caller_phone}')
         except Exception as e:

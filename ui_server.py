@@ -74,10 +74,13 @@ def health_check():
 # ── #40 Prometheus metrics endpoint ──────────────────────────────────────────
 try:
     from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-    _calls_total   = Counter("voice_calls_total",  "Total calls handled")
-    _calls_booked  = Counter("voice_calls_booked_total", "Calls that resulted in a booking")
-    _call_duration = Histogram("voice_call_duration_seconds", "Call duration in seconds",
-                               buckets=[10, 30, 60, 120, 300, 600])
+    try:
+        _calls_total   = Counter("voice_calls_total",  "Total calls handled")
+        _calls_booked  = Counter("voice_calls_booked_total", "Calls that resulted in a booking")
+        _call_duration = Histogram("voice_call_duration_seconds", "Call duration in seconds",
+                                   buckets=[10, 30, 60, 120, 300, 600])
+    except ValueError:
+        pass # Already registered
     @app.get("/metrics")
     def metrics():
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
@@ -161,41 +164,41 @@ def write_config(data):
 # ── Part C: Agent Helpers & Active Agent Route ──
 def get_active_agent_name():
     import db
-    ag = db.get_active_agent()
-    return ag["name"] if ag else "AI Assistant"
+    ag = db.get_inbound_active_agent() or db.get_outbound_active_agent()
+    return ag.name if ag else "AI Assistant"
 
 def get_active_agent_subtitle():
     import db
-    ag = db.get_active_agent()
-    return ag.get("subtitle", "Voice Agent") if ag else "Voice Agent"
+    ag = db.get_inbound_active_agent() or db.get_outbound_active_agent()
+    return ag.subtitle if ag else "Voice Agent"
 
 @app.get("/api/active-agent")
 def api_active_agent():
     import db
     try:
-        agent = db.get_active_agent()
+        agent = db.get_inbound_active_agent() or db.get_outbound_active_agent()
         if not agent:
             return {"error": "No active agent"}
-        DB_TO_CONFIG = {
-            "agentinstructions":        "agent_instructions",
-            "openinggreeting":          "opening_greeting",
-            "firstline":                "first_line",
-            "llmmodel":                 "llm_model",
-            "llmprovider":              "llm_provider",
-            "ttsvoice":                 "tts_voice",
-            "ttslanguage":              "tts_language",
-            "sttlanguage":              "stt_language",
-            "sttminendpointingdelay":   "stt_min_endpointing_delay",
-            "temperature":              "temperature",
-            "max_tokens":               "max_tokens",
+        
+        # UI expects specific keys
+        return {
+            "id": agent.id,
+            "name": agent.name,
+            "subtitle": agent.subtitle,
+            "agentinstructions": agent.system_prompt,
+            "openinggreeting": agent.opening_greeting,
+            "firstline": agent.first_line,
+            "llmmodel": agent.llm_model,
+            "llmprovider": agent.llm_provider,
+            "ttsvoice": agent.tts_voice,
+            "ttslanguage": agent.tts_language,
+            "sttlanguage": agent.stt_language,
+            "sttminendpointingdelay": agent.stt_min_endpointing_delay,
+            "temperature": agent.temperature,
+            "max_tokens": agent.max_tokens,
+            "ttsprovider": agent.tts_provider,
+            "sttprovider": agent.stt_provider,
         }
-        normalized = dict(agent)
-        for db_key, cfg_key in DB_TO_CONFIG.items():
-            if db_key in agent:
-                normalized[cfg_key] = agent[db_key]
-        normalized["name"] = agent.get("name", "AI Assistant")
-        normalized["subtitle"] = agent.get("subtitle", "Voice Agent")
-        return normalized
     except Exception as e:
         logger.error(f"[API] /api/active-agent failed: {e}")
         return {"error": str(e)}
@@ -206,10 +209,10 @@ async def api_put_active_agent(request: Request):
     import db
     try:
         data = await request.json()
-        active = db.get_active_agent()
+        active = db.get_inbound_active_agent() or db.get_outbound_active_agent()
         if not active:
             raise HTTPException(status_code=404, detail="No active agent.")
-        db.update_agent(active["id"], data)
+        db.update_agent(active.id, data)
         return {"ok": True}
     except Exception as e:
         logger.error(f"[API] PUT /api/active-agent error: {e}")
@@ -283,12 +286,10 @@ async def api_get_logs():
 async def api_get_transcript(log_id: str):
     import db
     try:
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
-        with psycopg2.connect(os.environ["DATABASE_URL"]) as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM call_logs WHERE id = %s", (log_id,))
-                data = dict(cur.fetchone() or {})
+        from db import get_supabase
+        sb = get_supabase()
+        res = sb.table("call_logs").select("*").eq("id", log_id).execute()
+        data = res.data[0] if res.data else {}
         if not data:
             return PlainTextResponse(content="Log not found", status_code=404)
         text = f"Call Log — {data.get('created_at', '')}\n"
@@ -719,21 +720,17 @@ async def api_campaign_stats(campaign_id: int):
         "leads": stats,
     }
 
-# ── Demo Link Endpoints (PostgreSQL-backed) ───────────────────────────────────
-
+# ── Demo Link Endpoints (Supabase-backed) ───────────────────────────────────
 
 import secrets, string as _string
-import psycopg2
-from psycopg2.extras import RealDictCursor as _RDC
-from db import get_conn as _get_conn
+from db import get_supabase
 
 @app.get("/api/demo/list")
 async def api_demo_list():
     try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=_RDC) as cur:
-                cur.execute("SELECT * FROM demo_links ORDER BY created_at DESC")
-                return [dict(r) for r in cur.fetchall()]
+        sb = get_supabase()
+        res = sb.table("demo_links").select("*").order("created_at", desc=True).execute()
+        return res.data or []
     except Exception as e:
         logger.error(f"[DEMO] list failed: {e}")
         return []
@@ -745,16 +742,19 @@ async def api_demo_create(request: Request):
     slug = ''.join(secrets.choice(_string.ascii_lowercase + _string.digits) for _ in range(8))
     language = body.get("language", "auto")
     try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO demo_links (slug, label, language) VALUES (%s, %s, %s) RETURNING id, slug",
-                    (slug, label, language)
-                )
-                row = cur.fetchone()
-                conn.commit()
+        sb = get_supabase()
+        res = sb.table("demo_links").insert({
+            "slug": slug,
+            "label": label,
+            "language": language
+        }).execute()
+        
+        row = res.data[0] if res.data else None
+        if not row:
+            raise Exception("Failed to insert demo link")
+            
         base_url = os.getenv("PUBLIC_BASE_URL", "")
-        return {"slug": row[1], "url": f"{base_url}/demo/{row[1]}", "label": label, "language": language, "token": row[1]}
+        return {"slug": row["slug"], "url": f"{base_url}/demo/{row['slug']}", "label": label, "language": language, "token": row["slug"]}
     except Exception as e:
         logger.error(f"[DEMO] create failed: {e}")
         raise HTTPException(500, str(e))
@@ -763,17 +763,17 @@ async def api_demo_create(request: Request):
 async def api_demo_token(slug: str):
     """Generate a LiveKit JWT for a browser visitor joining a demo room."""
     try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT is_active FROM demo_links WHERE slug = %s", (slug,))
-                row = cur.fetchone()
-                if not row or not row[0]:
-                    raise HTTPException(404, "Demo link not found or inactive")
-                cur.execute(
-                    "UPDATE demo_links SET total_sessions = total_sessions + 1 WHERE slug = %s",
-                    (slug,)
-                )
-                conn.commit()
+        sb = get_supabase()
+        res = sb.table("demo_links").select("is_active, total_sessions").eq("slug", slug).execute()
+        
+        if not res.data or not res.data[0].get("is_active"):
+            raise HTTPException(404, "Demo link not found or inactive")
+            
+        curr_sessions = res.data[0].get("total_sessions", 0)
+        sb.table("demo_links").update({
+            "total_sessions": curr_sessions + 1
+        }).eq("slug", slug).execute()
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -825,10 +825,8 @@ async def api_demo_token(slug: str):
 @app.delete("/api/demo/{slug}")
 async def api_demo_delete(slug: str):
     try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE demo_links SET is_active = FALSE WHERE slug = %s", (slug,))
-                conn.commit()
+        sb = get_supabase()
+        sb.table("demo_links").update({"is_active": False}).eq("slug", slug).execute()
         return {"status": "deactivated"}
     except Exception as e:
         logger.error(f"[DEMO] delete failed: {e}")
@@ -838,21 +836,20 @@ async def api_demo_delete(slug: str):
 async def demo_page(slug: str):
     """Serve the visitor-facing browser demo page."""
     try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT label, is_active FROM demo_links WHERE slug = %s", (slug,))
-                row = cur.fetchone()
+        sb = get_supabase()
+        res = sb.table("demo_links").select("label, is_active").eq("slug", slug).execute()
+        row = res.data[0] if res.data else None
     except Exception:
         row = None
 
-    if not row or not row[1]:
+    if not row or not row.get("is_active"):
         return HTMLResponse(
             "<h2 style='font-family:sans-serif;text-align:center;margin-top:20vh'>"
             "This demo link is invalid or has expired.</h2>",
             status_code=404
         )
 
-    label = (row[0] or "AI Voice Agent").replace('"', '&quot;').replace("'", "&#39;")
+    label = (row.get("label") or "AI Voice Agent").replace('"', '&quot;').replace("'", "&#39;")
 
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
@@ -1107,11 +1104,11 @@ import db
 def api_get_agents():
     import db
     try:
-        agents = db.get_all_agents()
-        # Normalize: add 'active' bool field the JS card renderer looks for
+        agents = db.list_agents()
+        # Ensure we return clean dicts for frontend rendering mapping 'active' states
         for a in agents:
-            a['active'] = bool(a.get('is_active', False))
-        return agents  # flat array — JS does fetch().then(r=>r.json())
+            a['active'] = bool(a.get('is_inbound_active') or a.get('is_outbound_active'))
+        return agents
     except Exception as e:
         logger.error(f"[API] /api/agents GET error: {e}")
         return []
@@ -1121,27 +1118,9 @@ async def api_agents_create(request: Request):
     import db, uuid
     data = await request.json()
     try:
-        agent = db.create_agent(
-            agent_id=str(uuid.uuid4()),
-            name=data.get("name", "New Agent"),
-            sttprovider=data.get("sttprovider", "sarvam"),
-            sttlanguage=data.get("sttlanguage", "hi-IN"),
-            llmprovider=data.get("llmprovider", "openai"),
-            llmmodel=data.get("llmmodel", "gpt-4.1-mini"),
-            ttsprovider=data.get("ttsprovider", "sarvam"),
-            ttsvoice=data.get("ttsvoice", "rohan"),
-            ttslanguage=data.get("ttslanguage", "hi-IN"),
-            firstline=data.get("firstline", ""),
-            openinggreeting=data.get("openinggreeting", ""),
-            agentinstructions=data.get("agentinstructions", data.get("systemprompt", "")),
-            temperature=float(data.get("temperature", 0.3)),
-            max_tokens=int(data.get("max_tokens", 400)),
-            maxturns=int(data.get("maxturns", 25)),
-            openrouterapikey=data.get("openrouterapikey", ""),
-            anthropicapikey=data.get("anthropicapikey", ""),
-            groqapikey=data.get("groqapikey", ""),
-            sttminendpointingdelay=float(data.get("sttminendpointingdelay", 0.5)),
-        )
+        # Pass directly into the db wrapper
+        data['id'] = str(uuid.uuid4())
+        agent = db.create_agent(data)
         return agent
     except Exception as e:
         logger.error(f"create_agent failed: {e}")
@@ -1152,70 +1131,18 @@ async def api_update_agent(agent_id: str, req: Request):
     import db
     data = await req.json()
     updated = db.update_agent(agent_id, data)
-    active = db.get_active_agent()
-    if active and str(active.get("id")) == str(agent_id):
-        cfg = read_config()
-        DB_TO_CONFIG = {
-            "agentinstructions":        "agent_instructions",
-            "openinggreeting":          "opening_greeting",
-            "firstline":                "first_line",
-            "llmmodel":                 "llm_model",
-            "llmprovider":              "llm_provider",
-            "ttsvoice":                 "tts_voice",
-            "ttslanguage":              "tts_language",
-            "ttsprovider":              "tts_provider",
-            "sttprovider":              "stt_provider",
-            "sttlanguage":              "stt_language",
-            "sttminendpointingdelay":   "stt_min_endpointing_delay",
-            "temperature":              "temperature",
-            "max_tokens":               "max_tokens",
-            "maxturns":                 "max_turns",
-        }
-        for db_key, cfg_key in DB_TO_CONFIG.items():
-            val = active.get(db_key)
-            if val is not None and val != "":
-                cfg[cfg_key] = val
-        write_config(cfg)
     return {"status": "ok", "agent": updated}
 
 @app.post("/api/agents/{agent_id}/activate")
 def api_activate_agent(agent_id: str):
+    # Backward compatibility: set as inbound by default if old button used
     import db
     try:
-        db.set_active_agent(agent_id)
+        db.set_active_agent(agent_id, mode='inbound')
+        target = db.get_agent_by_id(agent_id)
+        return {"status": "activated", "agent": target.__dict__ if target else None}
     except Exception as e:
         raise HTTPException(status_code=404, detail="Agent not found or activation failed")
-    target = db.get_active_agent()
-    if target:
-        cfg = read_config()
-        # Each entry: (snake_case_db_col, camelcase_alias, config_key)
-        # We try snake_case first (actual Postgres column), then camelCase fallback
-        FIELD_MAP = [
-            ("agent_instructions",        "agentinstructions",       "agent_instructions"),
-            ("openinggreeting",           "openinggreeting",          "opening_greeting"),
-            ("first_line",                "firstline",                "first_line"),
-            ("llm_model",                 "llmmodel",                 "llm_model"),
-            ("llm_provider",              "llmprovider",              "llm_provider"),
-            ("tts_voice",                 "ttsvoice",                 "tts_voice"),
-            ("tts_language",              "ttslanguage",              "tts_language"),
-            ("tts_provider",              "ttsprovider",              "tts_provider"),
-            ("stt_provider",              "sttprovider",              "stt_provider"),
-            ("stt_language",              "sttlanguage",              "stt_language"),
-            ("stt_min_endpointing_delay", "sttminendpointingdelay",   "stt_min_endpointing_delay"),
-            ("temperature",               "temperature",              "temperature"),
-            ("max_tokens",                "max_tokens",               "max_tokens"),
-            ("max_turns",                 "maxturns",                 "max_turns"),
-        ]
-        written = {}
-        for snake, camel, cfg_key in FIELD_MAP:
-            val = target.get(snake) or target.get(camel)
-            if val is not None and val != "":
-                cfg[cfg_key] = val
-                written[cfg_key] = val
-        write_config(cfg)
-        logger.info(f"[AGENT] Activated {target.get('name')} ({agent_id}). Config updated: {list(written.keys())}")
-        logger.info(f"[AGENT] First line: '{written.get('first_line', '')}' | Greeting: '{written.get('opening_greeting', '')}'")
-    return {"status": "activated", "agent": target}
 
 @app.delete("/api/agents/{agent_id}")
 def api_delete_agent(agent_id: str):
@@ -1231,34 +1158,8 @@ def api_activate_inbound(agent_id: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
     target = db.get_inbound_active_agent()
-    if target:
-        # Update config.json so the running worker picks up the new agent
-        cfg = read_config()
-        FIELD_MAP = [
-            ("agent_instructions", "agentinstructions",       "agent_instructions"),
-            ("openinggreeting",    "openinggreeting",          "opening_greeting"),
-            ("first_line",         "firstline",                "first_line"),
-            ("llm_model",          "llmmodel",                 "llm_model"),
-            ("llm_provider",       "llmprovider",              "llm_provider"),
-            ("tts_voice",          "ttsvoice",                 "tts_voice"),
-            ("tts_language",       "ttslanguage",              "tts_language"),
-            ("tts_provider",       "ttsprovider",              "tts_provider"),
-            ("stt_provider",       "sttprovider",              "stt_provider"),
-            ("stt_language",       "sttlanguage",              "stt_language"),
-            ("temperature",        "temperature",              "temperature"),
-            ("max_tokens",         "max_tokens",               "max_tokens"),
-            ("max_turns",          "maxturns",                 "max_turns"),
-        ]
-        written = {}
-        for snake, camel, cfg_key in FIELD_MAP:
-            val = target.get(snake) or target.get(camel)
-            if val is not None and val != "":
-                cfg[cfg_key] = val
-                written[cfg_key] = val
-        write_config(cfg)
-        logger.info(f"[AGENT] Set INBOUND agent: {target.get('name')} ({agent_id}). Fields written: {list(written.keys())}")
-        logger.info(f"[AGENT] first_line='{written.get('first_line','')}' | opening_greeting='{written.get('opening_greeting','')}'")    
-    return {"status": "inbound_activated", "agent": target}
+    logger.info(f"[AGENT] Set INBOUND agent: {target.name if target else None} ({agent_id})")
+    return {"status": "inbound_activated", "agent": target.__dict__ if target else None}
 
 @app.post("/api/agents/{agent_id}/activate-outbound")
 def api_activate_outbound(agent_id: str):
@@ -1268,8 +1169,8 @@ def api_activate_outbound(agent_id: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
     target = db.get_outbound_active_agent()
-    logger.info(f"[AGENT] Set OUTBOUND agent: {target.get('name') if target else None} ({agent_id})")
-    return {"status": "outbound_activated", "agent": target}
+    logger.info(f"[AGENT] Set OUTBOUND agent: {target.name if target else None} ({agent_id})")
+    return {"status": "outbound_activated", "agent": target.__dict__ if target else None}
 
 # ── Main Dashboard HTML ────────────────────────────────────────────────────────
 
