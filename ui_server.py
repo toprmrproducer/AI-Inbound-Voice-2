@@ -1106,13 +1106,19 @@ import db
 @app.get("/api/agents")
 def api_get_agents():
     import db
-    return {"agents": db.get_all_agents()}
+    try:
+        agents = db.get_all_agents()
+        # Normalize: add 'active' bool field the JS card renderer looks for
+        for a in agents:
+            a['active'] = bool(a.get('is_active', False))
+        return agents  # flat array — JS does fetch().then(r=>r.json())
+    except Exception as e:
+        logger.error(f"[API] /api/agents GET error: {e}")
+        return []
 
 @app.post("/api/agents")
 async def api_agents_create(request: Request):
-    import db
-    import uuid
-    from fastapi import HTTPException
+    import db, uuid
     data = await request.json()
     try:
         agent = db.create_agent(
@@ -1121,7 +1127,7 @@ async def api_agents_create(request: Request):
             sttprovider=data.get("sttprovider", "sarvam"),
             sttlanguage=data.get("sttlanguage", "hi-IN"),
             llmprovider=data.get("llmprovider", "openai"),
-            llmmodel=data.get("llmmodel", "gpt-4o-mini"),
+            llmmodel=data.get("llmmodel", "gpt-4.1-mini"),
             ttsprovider=data.get("ttsprovider", "sarvam"),
             ttsvoice=data.get("ttsvoice", "rohan"),
             ttslanguage=data.get("ttslanguage", "hi-IN"),
@@ -1130,13 +1136,16 @@ async def api_agents_create(request: Request):
             agentinstructions=data.get("agentinstructions", data.get("systemprompt", "")),
             temperature=float(data.get("temperature", 0.3)),
             max_tokens=int(data.get("max_tokens", 400)),
-            maxturns=int(data.get("maxturns", 20)),
+            maxturns=int(data.get("maxturns", 25)),
+            openrouterapikey=data.get("openrouterapikey", ""),
+            anthropicapikey=data.get("anthropicapikey", ""),
+            groqapikey=data.get("groqapikey", ""),
+            sttminendpointingdelay=float(data.get("sttminendpointingdelay", 0.5)),
         )
         return agent
     except Exception as e:
         logger.error(f"create_agent failed: {e}")
-        from fastapi import HTTPException
-        raise HTTPException(500, f"Failed to create agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
 
 @app.put("/api/agents/{agent_id}")
 async def api_update_agent(agent_id: str, req: Request):

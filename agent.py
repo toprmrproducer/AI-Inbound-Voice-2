@@ -208,26 +208,38 @@ def is_rate_limited(phone: str) -> bool:
 
 # ─────────────────────────── CONFIG LOADER ────────────────────────────────────
 def get_live_config(phone: str = None) -> dict:
-    """Load active agent config from DB, then fallback to config.json / env."""
+    """Load agent config from DB — phone-specific agent first, then active agent, then config.json."""
     try:
         import db as _db
-        active = _db.get_active_agent()
+        # Phone-specific routing: if phone is set, find agent assigned to that number
+        # Falls back to active agent if no specific match
+        if phone:
+            active = _db.get_agent_for_phone(phone)
+        else:
+            active = _db.get_active_agent()
+
         if active:
+            # DB stores columns as snake_case — read them directly
             return {
-                'agent_instructions':        active.get('agentinstructions', ''),
+                'agent_instructions':        active.get('agent_instructions') or active.get('agentinstructions', ''),
                 'opening_greeting':          active.get('openinggreeting', ''),
-                'first_line':                active.get('firstline', ''),
-                'llm_model':                 active.get('llmmodel', 'gpt-4.1-mini'),
-                'llm_provider':              active.get('llmprovider', 'openai'),
-                'tts_voice':                 active.get('ttsvoice', 'rohan'),
-                'tts_language':              active.get('ttslanguage', 'hi-IN'),
-                'tts_provider':              active.get('ttsprovider', 'sarvam'),
-                'stt_provider':              active.get('sttprovider', 'sarvam'),
-                'stt_language':              active.get('sttlanguage', 'unknown'),
-                'stt_min_endpointing_delay': float(active.get('sttminendpointingdelay', 0.5)),
-                'temperature':               float(active.get('temperature', 0.4)),
-                'max_tokens':                int(active.get('max_tokens', 400)),
-                'max_turns':                 int(active.get('maxturns', 25)),
+                'first_line':                active.get('first_line') or active.get('firstline', ''),
+                'llm_model':                 active.get('llm_model') or active.get('llmmodel', 'gpt-4.1-mini'),
+                'llm_provider':              active.get('llm_provider') or active.get('llmprovider', 'openai'),
+                'openrouter_api_key':        active.get('openrouter_api_key', ''),
+                'anthropic_api_key':         active.get('anthropic_api_key', ''),
+                'groq_api_key':              active.get('groq_api_key', ''),
+                'tts_voice':                 active.get('tts_voice') or active.get('ttsvoice', 'rohan'),
+                'tts_language':              active.get('tts_language') or active.get('ttslanguage', 'hi-IN'),
+                'tts_provider':              active.get('tts_provider') or active.get('ttsprovider', 'sarvam'),
+                'stt_provider':              active.get('stt_provider') or active.get('sttprovider', 'sarvam'),
+                'stt_language':              active.get('stt_language') or active.get('sttlanguage', 'unknown'),
+                'stt_min_endpointing_delay': float(active.get('stt_min_endpointing_delay') or active.get('sttminendpointingdelay') or 0.5),
+                'temperature':               float(active.get('temperature') or 0.4),
+                'max_tokens':                int(active.get('max_tokens') or 400),
+                'max_turns':                 int(active.get('max_turns') or active.get('maxturns') or 25),
+                '_agent_name':               active.get('name', 'AI Assistant'),
+                '_agent_id':                 active.get('id', ''),
             }
     except Exception as e:
         logger.warning(f'[CONFIG] DB load failed, fallback: {e}')
