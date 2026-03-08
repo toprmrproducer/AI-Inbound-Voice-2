@@ -21,49 +21,81 @@ def init_db():
             cur.execute("""
                 DO $$
                 BEGIN
-                    -- Add is_active if missing
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='agents' AND column_name='is_active'
-                    ) THEN
+                    -- Core booleans / identifiers
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='is_active') THEN
                         ALTER TABLE agents ADD COLUMN is_active BOOLEAN DEFAULT FALSE;
                     END IF;
-
-                    -- Add subtitle column
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='agents' AND column_name='subtitle'
-                    ) THEN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='subtitle') THEN
                         ALTER TABLE agents ADD COLUMN subtitle TEXT DEFAULT 'AI Assistant';
                     END IF;
-
-                    -- Add stt_provider column
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='agents' AND column_name='stt_provider'
-                    ) THEN
-                        ALTER TABLE agents ADD COLUMN stt_provider TEXT DEFAULT 'sarvam';
-                    END IF;
-
-                    -- Add phone_number_mapping column
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='agents' AND column_name='phone_numbers'
-                    ) THEN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='phone_numbers') THEN
                         ALTER TABLE agents ADD COLUMN phone_numbers TEXT[] DEFAULT '{}';
                     END IF;
 
-                    -- Add new provider columns (multi-LLM support)
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='agents' AND column_name='llm_provider'
-                    ) THEN
-                        ALTER TABLE agents ADD COLUMN llm_provider TEXT DEFAULT 'openai';
-                        ALTER TABLE agents ADD COLUMN openrouter_api_key TEXT DEFAULT '';
-                        ALTER TABLE agents ADD COLUMN anthropic_api_key TEXT DEFAULT '';
-                        ALTER TABLE agents ADD COLUMN groq_api_key TEXT DEFAULT '';
-                        ALTER TABLE agents ADD COLUMN max_turns INTEGER DEFAULT 25;
+                    -- STT
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='stt_provider') THEN
+                        ALTER TABLE agents ADD COLUMN stt_provider TEXT DEFAULT 'sarvam';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='stt_language') THEN
+                        ALTER TABLE agents ADD COLUMN stt_language TEXT DEFAULT 'hi-IN';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='stt_min_endpointing_delay') THEN
                         ALTER TABLE agents ADD COLUMN stt_min_endpointing_delay FLOAT DEFAULT 0.5;
+                    END IF;
+
+                    -- TTS
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='tts_provider') THEN
+                        ALTER TABLE agents ADD COLUMN tts_provider TEXT DEFAULT 'sarvam';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='tts_voice') THEN
+                        ALTER TABLE agents ADD COLUMN tts_voice TEXT DEFAULT 'rohan';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='tts_language') THEN
+                        ALTER TABLE agents ADD COLUMN tts_language TEXT DEFAULT 'hi-IN';
+                    END IF;
+
+                    -- LLM provider + model
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='llm_provider') THEN
+                        ALTER TABLE agents ADD COLUMN llm_provider TEXT DEFAULT 'openai';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='llm_model') THEN
+                        ALTER TABLE agents ADD COLUMN llm_model TEXT DEFAULT 'gpt-4.1-mini';
+                    END IF;
+
+                    -- Provider API keys
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='openrouter_api_key') THEN
+                        ALTER TABLE agents ADD COLUMN openrouter_api_key TEXT DEFAULT '';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='anthropic_api_key') THEN
+                        ALTER TABLE agents ADD COLUMN anthropic_api_key TEXT DEFAULT '';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='groq_api_key') THEN
+                        ALTER TABLE agents ADD COLUMN groq_api_key TEXT DEFAULT '';
+                    END IF;
+
+                    -- Agent text fields
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='first_line') THEN
+                        ALTER TABLE agents ADD COLUMN first_line TEXT DEFAULT '';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='openinggreeting') THEN
+                        ALTER TABLE agents ADD COLUMN openinggreeting TEXT DEFAULT '';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='agent_instructions') THEN
+                        ALTER TABLE agents ADD COLUMN agent_instructions TEXT DEFAULT '';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='system_prompt') THEN
+                        ALTER TABLE agents ADD COLUMN system_prompt TEXT DEFAULT '';
+                    END IF;
+
+                    -- Tuning parameters
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='temperature') THEN
+                        ALTER TABLE agents ADD COLUMN temperature FLOAT DEFAULT 0.3;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='max_tokens') THEN
+                        ALTER TABLE agents ADD COLUMN max_tokens INTEGER DEFAULT 400;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='max_turns') THEN
+                        ALTER TABLE agents ADD COLUMN max_turns INTEGER DEFAULT 25;
                     END IF;
                 END $$;
             """)
