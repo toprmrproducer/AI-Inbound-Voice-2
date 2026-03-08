@@ -119,30 +119,17 @@ from livekit.agents.voice import room_io
 
 async def start_session(session, ctx, agent, room_options=None):
     """
-    LiveKit 1.4.2 compatible start:
-    - Use RoomInputOptions / RoomOutputOptions (legacy)
-    - Let LiveKit internally convert to RoomOptions
+    LiveKit 1.4.2 compatible start using legacy RoomInputOptions/RoomOutputOptions
+    with no unsupported kwargs.
     """
-    # Build legacy RoomInputOptions / RoomOutputOptions
-    if isinstance(room_options, room_io.RoomOptions):
-        # If something passed a new RoomOptions, split into input/output
-        in_opts = room_io.RoomInputOptions(
-            audio=room_options.audio_input or room_io.AudioInputOptions()
-        )
-        out_opts = room_io.RoomOutputOptions(
-            audio=room_options.audio_output or room_io.AudioOutputOptions()
-        )
-    elif isinstance(room_options, room_io.RoomInputOptions):
+    # Legacy input options
+    if isinstance(room_options, room_io.RoomInputOptions):
         in_opts = room_options
-        out_opts = room_io.RoomOutputOptions(audio=room_io.AudioOutputOptions())
     else:
-        # Most cases: build both from scratch
-        in_opts = room_io.RoomInputOptions(
-            audio=room_io.AudioInputOptions(),
-        )
-        out_opts = room_io.RoomOutputOptions(
-            audio=room_io.AudioOutputOptions(),
-        )
+        in_opts = room_io.RoomInputOptions()  # rely on defaults
+
+    # Legacy output options — constructor takes no args in this version
+    out_opts = room_io.RoomOutputOptions()
 
     await session.start(
         room=ctx.room,
