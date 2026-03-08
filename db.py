@@ -687,7 +687,7 @@ def get_pending_leads(campaign_id, limit: int = 1) -> list:
         return []
 
 
-def update_lead_status(lead_id: str, status: str) -> bool:
+def update_lead_status(lead_id: str, status: str, notes: str = "") -> bool:
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -696,14 +696,19 @@ def update_lead_status(lead_id: str, status: str) -> bool:
                         UPDATE leads
                         SET status = %s,
                             call_attempts = call_attempts + 1,
-                            last_call_at = NOW()
+                            last_call_at = NOW(),
+                            updated_at = NOW()
                         WHERE id = %s
                     """, (status, lead_id))
                 else:
-                    cur.execute(
-                        "UPDATE leads SET status = %s WHERE id = %s",
-                        (status, lead_id)
-                    )
+                    cur.execute("""
+                        UPDATE leads
+                        SET status = %s,
+                            notes = COALESCE(%s, notes),
+                            retry_count = CASE WHEN %s = 'failed' THEN retry_count + 1 ELSE retry_count END,
+                            updated_at = NOW()
+                        WHERE id = %s
+                    """, (status, notes or None, status, lead_id))
                 conn.commit()
                 return True
     except Exception as e:
@@ -734,30 +739,27 @@ def requeue_failed_leads(campaign_id) -> int:
 
 
 def get_leads_stats(campaign_id) -> dict:
+    """Return count of leads by status for a campaign."""
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT
-                        COUNT(*) AS total,
-                        COUNT(*) FILTER (WHERE status = 'pending') AS pending,
-                        COUNT(*) FILTER (WHERE status = 'calling') AS calling,
-                        COUNT(*) FILTER (WHERE status = 'completed') AS completed,
-                        COUNT(*) FILTER (WHERE status = 'failed') AS failed
+                    SELECT status, COUNT(*) as count
                     FROM leads
                     WHERE campaign_id = %s
+                    GROUP BY status
                 """, (campaign_id,))
-                row = cur.fetchone()
-                return {
-                    "total": row[0],
-                    "pending": row[1],
-                    "calling": row[2],
-                    "completed": row[3],
-                    "failed": row[4],
-                }
+                rows = cur.fetchall()
+        stats = {'total': 0, 'pending': 0, 'calling': 0, 'called': 0, 'completed': 0, 'failed': 0, 'skipped': 0}
+        for row in rows:
+            status = row[0] or 'pending'
+            count  = int(row[1])
+            stats[status] = count
+            stats['total'] += count
+        return stats
     except Exception as e:
         logger.error(f"[DB] get_leads_stats failed: {e}")
-        return {"total": 0, "pending": 0, "calling": 0, "completed": 0, "failed": 0}
+        return {'total': 0, 'pending': 0, 'calling': 0, 'called': 0, 'completed': 0, 'failed': 0, 'skipped': 0}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

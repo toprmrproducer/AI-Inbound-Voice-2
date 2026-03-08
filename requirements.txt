@@ -99,5 +99,6 @@ urllib3==2.6.3
 uvicorn[standard]
 websockets
 httpx[http2]
+python-multipart==0.0.9
 
 
