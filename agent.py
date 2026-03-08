@@ -117,28 +117,33 @@ def build_session(stt, llm, tts, vad, config: dict):
 
 from livekit.agents.voice import room_io
 
-async def start_session(session, ctx, agent, room_input_options=None, room_output_options=None):
+async def start_session(session, ctx, agent, room_options=None):
     """
-    LiveKit 1.4.2 compatible start, always passing a RoomOptions instance.
+    LiveKit 1.4.2 compatible start:
+    - Use RoomInputOptions / RoomOutputOptions (legacy)
+    - Let LiveKit internally convert to RoomOptions
     """
-    # Build proper RoomOptions objects
-    if isinstance(room_input_options, room_io.RoomOptions):
-        in_opts = room_input_options
+    # Build legacy RoomInputOptions / RoomOutputOptions
+    if isinstance(room_options, room_io.RoomOptions):
+        # If something passed a new RoomOptions, split into input/output
+        in_opts = room_io.RoomInputOptions(
+            audio=room_options.audio_input or room_io.AudioInputOptions()
+        )
+        out_opts = room_io.RoomOutputOptions(
+            audio=room_options.audio_output or room_io.AudioOutputOptions()
+        )
+    elif isinstance(room_options, room_io.RoomInputOptions):
+        in_opts = room_options
+        out_opts = room_io.RoomOutputOptions(audio=room_io.AudioOutputOptions())
     else:
-        in_opts = room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(),
-            audio_output=None,
+        # Most cases: build both from scratch
+        in_opts = room_io.RoomInputOptions(
+            audio=room_io.AudioInputOptions(),
+        )
+        out_opts = room_io.RoomOutputOptions(
+            audio=room_io.AudioOutputOptions(),
         )
 
-    if isinstance(room_output_options, room_io.RoomOptions):
-        out_opts = room_output_options
-    else:
-        out_opts = room_io.RoomOptions(
-            audio_input=None,
-            audio_output=room_io.AudioOutputOptions(),
-        )
-
-    # Call start() with the right kwarg names for this version
     await session.start(
         room=ctx.room,
         agent=agent,
