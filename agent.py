@@ -115,22 +115,36 @@ def build_session(stt, llm, tts, vad, config: dict):
             pass
     return AgentSession(**base_kwargs)
 
-async def start_session(session, ctx, agent, room_input_options=None):
-    """Version-safe session.start()"""
-    import inspect
-    sig = inspect.signature(session.start)
-    params = sig.parameters
+from livekit.agents.voice import room_io
 
-    if room_input_options is None:
-        await session.start(room=ctx.room, agent=agent)
-        return
-
-    if 'room_options' in params:
-        await session.start(room=ctx.room, agent=agent, room_options=room_input_options)
-    elif 'room_input_options' in params:
-        await session.start(room=ctx.room, agent=agent, room_input_options=room_input_options)
+async def start_session(session, ctx, agent, room_input_options=None, room_output_options=None):
+    """
+    LiveKit 1.4.2 compatible start, always passing a RoomOptions instance.
+    """
+    # Build proper RoomOptions objects
+    if isinstance(room_input_options, room_io.RoomOptions):
+        in_opts = room_input_options
     else:
-        await session.start(room=ctx.room, agent=agent)
+        in_opts = room_io.RoomOptions(
+            audio_input=room_io.AudioInputOptions(),
+            audio_output=None,
+        )
+
+    if isinstance(room_output_options, room_io.RoomOptions):
+        out_opts = room_output_options
+    else:
+        out_opts = room_io.RoomOptions(
+            audio_input=None,
+            audio_output=room_io.AudioOutputOptions(),
+        )
+
+    # Call start() with the right kwarg names for this version
+    await session.start(
+        room=ctx.room,
+        agent=agent,
+        room_input_options=in_opts,
+        room_output_options=out_opts,
+    )
 
 async def wait_for_disconnect(ctx):
     """Version-safe disconnect wait."""
